@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+import ipaddress
+import sys
+s=set()
+for l in sys.stdin:
+ l=l.strip()
+ if not l:continue
+ try:
+  if '/' in l:n=ipaddress.IPv4Network(l,strict=False);[s.add(str(i))for i in n.hosts()]
+  else:s.add(str(ipaddress.IPv4Address(l)))
+ except:pass
+for i in sorted(s):print(i)
