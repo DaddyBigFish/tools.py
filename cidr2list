@@ -2,6 +2,8 @@
 import ipaddress
 import sys
 s=set()
+split=False
+if len(sys.argv)>1 and sys.argv[1]=="--split":split=True
 for l in sys.stdin:
  l=l.strip()
  if not l:continue
@@ -9,4 +11,17 @@ for l in sys.stdin:
   if '/' in l:n=ipaddress.IPv4Network(l,strict=False);[s.add(str(i))for i in n.hosts()]
   else:s.add(str(ipaddress.IPv4Address(l)))
  except:pass
-for i in sorted(s):print(i)
+ips=sorted(s)
+if split:
+ with open("hosts","w") as f:
+  for i in ips:f.write(i+"\n")
+ d={}
+ for i in ips:
+  a,b,c,_=i.split('.');k=f"{a}.{b}.{c}"
+  if k not in d:d[k]=[]
+  d[k].append(i)
+ for k in sorted(d):
+  with open(f"hosts_{k}.X","w") as f:
+   for ip in sorted(d[k]):f.write(ip+"\n")
+else:
+ for i in ips:print(i)
