@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import requests,sys,warnings
 from urllib3.exceptions import InsecureRequestWarning
 warnings.simplefilter('ignore',InsecureRequestWarning)
