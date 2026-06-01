@@ -249,7 +249,7 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
 #main{display:flex;flex:1;overflow:hidden;min-height:0}
 
 /* === host tree === */
-#hosttree{width:230px;border-right:1px solid var(--bd-s);display:flex;flex-direction:column;flex-shrink:0;background:var(--bg2);min-width:120px}
+#hosttree{width:275px;border-right:1px solid var(--bd-s);display:flex;flex-direction:column;flex-shrink:0;background:var(--bg2);min-width:120px}
 #treeheader{padding:10px 12px 8px;border-bottom:1px solid var(--bd-s);flex-shrink:0;display:flex;align-items:center;justify-content:space-between}
 #treeheader span{font-size:10px;font-weight:700;color:var(--tx-d);letter-spacing:.1em;text-transform:uppercase}
 #treeheader button{background:none;border:1px solid var(--bd);color:var(--tx-d);padding:3px 9px;cursor:pointer;font-family:var(--ui);font-size:11px;border-radius:5px;font-weight:500;transition:all .15s}
@@ -291,7 +291,7 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
 .thost.sel .thostcount{color:var(--ac-tx);opacity:.6}
 .thostwrap{margin:0 6px 3px}
 .thostwrap>.thost{margin:1px 0}
-.trs-list{padding:2px 4px 6px 28px}
+.trs-list{padding:2px 4px 6px 38px}
 .trs-row{display:flex;align-items:center;gap:5px;padding:2px 5px;border-radius:4px}
 .trs-row:hover{background:var(--bg3)}
 .trs-name{font-size:10px;color:var(--tx-d);font-family:var(--mono);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
