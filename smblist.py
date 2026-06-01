@@ -11,7 +11,10 @@ Usage:
   smblist.py <creds> -gui [-dir <folder>]       - launch web gui (auto-loads smblist_* files)
   smblist.py <creds> [shares.txt] -o out.txt   - output to file and terminal
 
-creds format: domain/user%pass
+creds: same format as smbclient -U  →  domain/user%pass
+  CORP/jsmith%Password123       domain account
+  ./localadmin%Pass1            local account  (use . for domain)
+  CORP/guest%                   blank password
 """
 
 import sys, os, re, subprocess, threading, webbrowser, json, time, queue, urllib.request
@@ -50,7 +53,8 @@ def run_cmd(cmd, use_proxy=False, timeout=None):
         return subprocess.CompletedProcess(cmd, 1, stdout='', stderr='timed out')
 
 
-def parse_nxc(source, is_file=True):
+def parse_nxc_full(source, is_file=True):
+    """Returns (readable_shares, restricted_shares). Restricted = IPC$ or no READ permission."""
     lines = open(source).readlines() if is_file else source.splitlines(keepends=True)
     hostmap = {}
     for line in lines:
@@ -59,20 +63,34 @@ def parse_nxc(source, is_file=True):
         im = re.search(r'SMB\s+([\d.]+)', line)
         if im and nm and dm:
             hostmap[im.group(1)] = (nm.group(1).strip() + '.' + dm.group(1).strip()).upper()
-    results = []
+    readable = []
+    restricted = []
+    seen = set()
     for line in lines:
-        if 'READ' not in line:
-            continue
         im = re.search(r'SMB\s+([\d.]+)', line)
-        m = re.search(r'SMB\s+[\d.]+\s+\d+\s+\S+\s+(.+?)\s+READ', line)
-        if not im or not m:
+        if not im:
             continue
-        share = m.group(1).strip()
-        if share == 'IPC$':
+        m = re.match(r'SMB\s+[\d.]+\s+\d+\s+\S+\s+(\S+)', line)
+        if not m:
             continue
+        token = m.group(1)
+        if token.startswith('[') or token in ('Share', 'Permissions', 'Remark') or token.startswith('-'):
+            continue
+        share = token
         host = hostmap.get(im.group(1), im.group(1))
-        results.append('//' + host + '/' + share)
-    return results
+        share_path = '//' + host + '/' + share
+        if share_path in seen:
+            continue
+        seen.add(share_path)
+        if share == 'IPC$' or 'READ' not in line:
+            restricted.append(share_path)
+        else:
+            readable.append(share_path)
+    return readable, restricted
+
+
+def parse_nxc(source, is_file=True):
+    return parse_nxc_full(source, is_file)[0]
 
 
 def resolve_host(host, dns_server):
@@ -129,7 +147,10 @@ def run_smblist(shares, creds, outfile=None, proxy=False):
             share = share.strip()
             if not share:
                 continue
-            for p in smbclient_ls(share, creds, proxy):
+            paths = smbclient_ls(share, creds, proxy)
+            if not paths:
+                print(f'[-] no files found (timeout, access denied, or empty): {share}', file=sys.stderr)
+            for p in paths:
                 print(p)
                 if fh:
                     fh.write(p + '\n')
@@ -268,6 +289,15 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
 .thost.sel .thostname{color:var(--ac-tx)}
 .thostcount{font-size:10px;color:var(--tx-d);flex-shrink:0;min-width:24px;text-align:right;font-family:var(--mono)}
 .thost.sel .thostcount{color:var(--ac-tx);opacity:.6}
+.thostwrap{margin:0 6px 3px}
+.thostwrap>.thost{margin:1px 0}
+.trs-list{padding:2px 4px 6px 28px}
+.trs-row{display:flex;align-items:center;gap:5px;padding:2px 5px;border-radius:4px}
+.trs-row:hover{background:var(--bg3)}
+.trs-name{font-size:10px;color:var(--tx-d);font-family:var(--mono);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trs-readable{color:var(--ac-tx);cursor:pointer}
+.trs-readable:hover{color:var(--ac);text-decoration:underline}
+.trs-scan{font-size:10px;padding:1px 7px;flex-shrink:0}
 .tugzone{margin:8px 6px 2px;border-radius:6px}
 .tugzone.dragover{background:rgba(47,129,247,.05);outline:1px dashed rgba(47,129,247,.3);outline-offset:-1px}
 .tuglbl{padding:4px 10px;font-size:10px;color:var(--tx-d);font-weight:700;letter-spacing:.08em;text-transform:uppercase;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--bd-s);margin-top:2px}
@@ -309,6 +339,17 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
 #extfoot-lbl{font-size:10px;color:var(--tx-d);flex:1}
 #extfoot-clear{background:none;border:1px solid var(--bd-s);color:var(--tx-d);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px;font-family:var(--ui);transition:all .12s;white-space:nowrap}
 #extfoot-clear:hover{border-color:var(--tx-d);color:var(--tx)}
+#sharedrop-wrap{position:relative}
+#sharebtn{width:100%;background:var(--bg3);border:1px solid var(--bd);color:var(--tx-m);padding:4px 9px;cursor:pointer;font-family:var(--ui);font-size:11px;border-radius:6px;text-align:left;display:flex;justify-content:space-between;align-items:center;transition:all .15s;line-height:1.4}
+#sharebtn:hover{border-color:var(--tx-d);color:var(--tx)}
+#sharebtn.active{border-color:var(--ac);color:var(--ac-tx);background:var(--ac-bg)}
+#sharedrop{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--bg2);border:1px solid var(--bd);border-radius:8px;z-index:500;box-shadow:0 8px 24px rgba(0,0,0,.5);display:none;flex-direction:column;min-width:200px}
+#sharedrop.open{display:flex}
+#sharelist{max-height:200px;overflow-y:auto;padding:3px 0}
+#sharefoot{border-top:1px solid var(--bd-s);padding:5px 8px;display:flex;justify-content:space-between;align-items:center;gap:6px}
+#sharefoot-lbl{font-size:10px;color:var(--tx-d);flex:1}
+#sharefoot-clear{background:none;border:1px solid var(--bd-s);color:var(--tx-d);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px;font-family:var(--ui);transition:all .12s;white-space:nowrap}
+#sharefoot-clear:hover{border-color:var(--tx-d);color:var(--tx)}
 #pathList{flex:1;overflow-y:auto;position:relative;background:var(--bg1)}
 .path{padding:3px 14px;cursor:pointer;font-size:11px;color:var(--tx-s);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:absolute;left:0;right:0;font-family:var(--mono);letter-spacing:-.02em;transition:color .08s}
 .path:hover{background:var(--bg2);color:var(--tx)}
@@ -430,6 +471,16 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
             <input type=text id=extsearch placeholder="Search extensions..." oninput=paintExtChips()>
             <div id=extlist></div>
             <div id=extfoot><span id=extfoot-lbl></span><button id=extfoot-clear onclick=clearExtFilters()>Clear</button></div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class=lbl>Shares</div>
+        <div id=sharedrop-wrap>
+          <button id=sharebtn onclick="toggleShareDrop(event)"><span id=sharebtn-lbl>All Shares</span><span style="font-size:9px;opacity:.5;margin-left:4px">&#9660;</span></button>
+          <div id=sharedrop>
+            <div id=sharelist></div>
+            <div id=sharefoot><span id=sharefoot-lbl></span><button id=sharefoot-clear onclick=clearShareFilters()>Clear</button></div>
           </div>
         </div>
       </div>
@@ -600,6 +651,21 @@ const EXT_DESC={
 };
 const ROW_H=20;
 let all=[],cur=null,ft=null,hlt=null,lastContent='',filtered=[],displayed=[],exts=new Set(),negExts=new Set(),fnOnly=true,uniqueNames=false;
+let allRestrictedByHost={};
+function extractRestricted(jobdata){
+  // any share we actually enumerated files from is readable — don't show it as restricted
+  const accessible=new Set(allPaths.map(p=>{const parts=p.split('/');return parts.slice(0,4).join('/');}));
+  const byHost={};
+  Object.values(jobdata).forEach(j=>{
+    (j.restricted||[]).forEach(sp=>{
+      if(accessible.has(sp))return;
+      const m=sp.match(/^\\/\\/([^/]+)/);
+      if(m){const h=m[1];if(!byHost[h])byHost[h]=[];if(!byHost[h].includes(sp))byHost[h].push(sp);}
+    });
+  });
+  return byHost;
+}
+let incShares=new Set(),negShares=new Set(),_shareCounts={};
 let pollTimer=null,dlPollTimer=null;
 let activeCtrl=null,activeTid=null;
 let _extCounts={};
@@ -659,7 +725,7 @@ function loadPaths(){
 loadPaths();
 fetch('/extdescs').then(r=>r.json()).then(d=>{_fileDescs=d;}).catch(()=>{});
 fetch('/jobs').then(r=>r.json()).then(d=>{
-  allJobs=d;renderJobs(d);
+  allJobs=d;allRestrictedByHost=extractRestricted(d);renderJobs(d);renderTree();
   if(Object.values(d).some(j=>j.status!=='done'&&j.status!=='error'))startPolling();
 });
 
@@ -720,7 +786,7 @@ function poll(){
     fetch('/paths').then(r=>r.json()),
     fetch('/jobs').then(r=>r.json())
   ]).then(([newPaths,jobdata])=>{
-    allJobs=jobdata;allPaths=newPaths;
+    allJobs=jobdata;allRestrictedByHost=extractRestricted(jobdata);allPaths=newPaths;
     renderJobs(jobdata);
     const treeSig=newPaths.length+'|'+(newPaths[newPaths.length-1]||'');
     if(treeSig!==_lastTreeSig){_lastTreeSig=treeSig;renderTree();}
@@ -937,13 +1003,30 @@ function addSelectedToGroup(){
   saveGroups();clearSel();
 }
 
+function getHostShares(hostname){
+  const prefix='//'+hostname+'/';
+  const readableSet=new Set();
+  allPaths.forEach(p=>{if(p.startsWith(prefix)){const parts=p.split('/');if(parts[3])readableSet.add(parts[3]);}});
+  const restricted=(allRestrictedByHost[hostname]||[]).filter(sp=>{
+    const n=sp.split('/').filter(Boolean).pop();
+    return n&&n!=='IPC$'&&!readableSet.has(n);
+  });
+  return{readable:[...readableSet].sort(),restricted};
+}
+function filterToShare(hostname,shareName){
+  activeFilter={type:'host',hostname};
+  exts.clear();negExts.clear();
+  incShares.clear();negShares.clear();
+  incShares.add(shareName);
+  syncShareChips();updateShareBtn();
+  renderTree();requestAnimationFrame(applyFilter);
+}
 function makeHostEl(hostname,pathCount,sourceGroupId){
   const isSel=activeFilter&&activeFilter.type==='host'&&activeFilter.hostname===hostname;
   const isPick=selectedHosts.has(hostname);
   const div=document.createElement('div');
   div.className='thost'+(isSel?' sel':'')+(isPick?' pick':'');
   div.draggable=true;
-
   div.addEventListener('dragstart',e=>{
     dragState={hostname,sourceGroupId};
     e.dataTransfer.effectAllowed='move';
@@ -955,7 +1038,6 @@ function makeHostEl(hostname,pathCount,sourceGroupId){
     if(e.target===cb)return;
     setFilter({type:'host',hostname});
   };
-
   const cb=document.createElement('input');
   cb.type='checkbox';cb.className='thost-cb';cb.checked=isPick;
   cb.addEventListener('click',e=>{
@@ -974,18 +1056,50 @@ function makeHostEl(hostname,pathCount,sourceGroupId){
       else selectedHosts.delete(hostname);
       div.classList.toggle('pick',cb.checked);
     }
-    lastSelHost=hostname;
-    updateSelBar();
+    lastSelHost=hostname;updateSelBar();
   });
-
   const nm=document.createElement('span');
   nm.className='thostname';nm.title=hostname;nm.textContent=hostname;
-
   const cnt=document.createElement('span');
   cnt.className='thostcount';cnt.textContent=pathCount||'';
-
   div.appendChild(cb);div.appendChild(nm);div.appendChild(cnt);
-  return div;
+
+  const wrap=document.createElement('div');
+  wrap.className='thostwrap';
+  wrap.appendChild(div);
+  const{readable,restricted}=getHostShares(hostname);
+  const allShares=[
+    ...readable.map(n=>({name:n,readable:true})),
+    ...restricted.map(sp=>({name:sp.split('/').filter(Boolean).pop()||sp,path:sp,readable:false}))
+  ];
+  if(allShares.length>0){
+    const rList=document.createElement('div');rList.className='trs-list';
+    allShares.forEach(share=>{
+      const row=document.createElement('div');row.className='trs-row';
+      const snm=document.createElement('span');
+      snm.className='trs-name'+(share.readable?' trs-readable':'');
+      snm.textContent=share.name;
+      snm.title=share.readable?'Filter to '+share.name:(share.path||share.name);
+      if(share.readable)snm.onclick=e=>{e.stopPropagation();filterToShare(hostname,share.name);};
+      row.appendChild(snm);
+      if(!share.readable){
+        const btn=document.createElement('button');btn.className='btn trs-scan';btn.textContent='Scan';
+        btn.onclick=e=>{e.stopPropagation();scanRestrictedShare(share.path,btn);};
+        row.appendChild(btn);
+      }
+      rList.appendChild(row);
+    });
+    wrap.appendChild(rList);
+  }
+  return wrap;
+}
+function scanRestrictedShare(sharePath,btn){
+  btn.textContent='...';btn.disabled=true;
+  fetch('/scanshare?share='+encodeURIComponent(sharePath)+'&proxy='+proxy())
+    .then(r=>r.json()).then(d=>{
+      if(d.ok){startPolling();poll();btn.textContent='Queued';setTimeout(()=>{btn.textContent='Re-scan';btn.disabled=false;},4000);}
+      else{btn.textContent='Error';btn.disabled=false;}
+    }).catch(()=>{btn.textContent='Error';btn.disabled=false;});
 }
 
 // ── drag / drop ──
@@ -1011,7 +1125,8 @@ function dropOnGroup(targetGroupId){
 
 // ── filter ──
 function setFilter(f){
-  activeFilter=f;exts.clear();negExts.clear();renderTree();requestAnimationFrame(applyFilter);
+  activeFilter=f;exts.clear();negExts.clear();incShares.clear();negShares.clear();
+  syncShareChips();updateShareBtn();renderTree();requestAnimationFrame(applyFilter);
 }
 
 function applyFilter(){
@@ -1098,6 +1213,8 @@ function go(){
   const val=document.getElementById('filterpath').value.trim();
   let tf=all;
   if(val){const terms=val.toLowerCase().split(',').map(t=>t.trim()).filter(Boolean);tf=all.filter(p=>{const target=fnOnly?(p.split('/').pop()||p).toLowerCase():p.toLowerCase();return terms.some(t=>target.includes(t));});}
+  rebuildShares(tf);
+  if(incShares.size>0||negShares.size>0){tf=tf.filter(p=>{const m=p.match(/^\\/\\/[^/]+\\/([^/]+)/);if(!m)return true;const sn=m[1];if(negShares.has(sn))return false;return incShares.size===0||incShares.has(sn);});}
   rebuildExts(tf);
   let out;
   if(fnOnly){
@@ -1123,6 +1240,8 @@ function toggleExtDrop(e){
 document.addEventListener('click',function(e){
   const w=document.getElementById('extdrop-wrap');
   if(w&&!w.contains(e.target))document.getElementById('extdrop').classList.remove('open');
+  const sw=document.getElementById('sharedrop-wrap');
+  if(sw&&!sw.contains(e.target))document.getElementById('sharedrop').classList.remove('open');
 });
 function updateExtBtn(){
   const inc=exts.size,exc=negExts.size;
@@ -1216,6 +1335,51 @@ function paintExtChips(){
 }
 function clearExtFilters(){exts.clear();negExts.clear();paintExtChips();requestAnimationFrame(go);}
 function onExtSearch(){paintExtChips();}
+function rebuildShares(paths){
+  const counts={};
+  paths.forEach(p=>{const m=p.match(/^\\/\\/[^/]+\\/([^/]+)/);if(m)counts[m[1]]=(counts[m[1]]||0)+1;});
+  _shareCounts=counts;paintShareChips();
+}
+function toggleShareDrop(e){
+  if(e)e.stopPropagation();
+  const d=document.getElementById('sharedrop');
+  d.classList.toggle('open',!d.classList.contains('open'));
+}
+function updateShareBtn(){
+  const inc=incShares.size,exc=negShares.size;
+  const btn=document.getElementById('sharebtn');const lbl=document.getElementById('sharebtn-lbl');
+  const fl=document.getElementById('sharefoot-lbl');
+  if(!inc&&!exc){lbl.textContent='All Shares';btn.classList.remove('active');if(fl)fl.textContent='';}
+  else{const parts=[];if(inc)parts.push(inc+' included');if(exc)parts.push(exc+' excluded');lbl.textContent=parts.join(', ');btn.classList.add('active');if(fl)fl.textContent=(inc+exc)+' active';}
+}
+function syncShareChips(){
+  document.querySelectorAll('#sharelist .ext-row').forEach(row=>{
+    const sn=row.dataset.share;
+    const ib=row.querySelector('.ext-inc');const eb=row.querySelector('.ext-exc');
+    if(ib)ib.classList.toggle('on',incShares.has(sn));
+    if(eb)eb.classList.toggle('on',negShares.has(sn));
+  });
+  updateShareBtn();
+}
+function paintShareChips(){
+  const list=document.getElementById('sharelist');if(!list)return;
+  const frag=document.createDocumentFragment();
+  const entries=Object.entries(_shareCounts).sort((a,b)=>b[1]-a[1]);
+  entries.forEach(([sn,cnt])=>{
+    const row=document.createElement('div');row.className='ext-row';row.dataset.share=sn;
+    const lbl=document.createElement('span');lbl.className='ext-lbl';
+    const nm=document.createElement('span');nm.className='ext-name';nm.textContent=sn;lbl.appendChild(nm);
+    const ct=document.createElement('span');ct.className='ext-cnt';ct.textContent=cnt;
+    const inc=document.createElement('button');inc.className='ext-inc'+(incShares.has(sn)?' on':'');inc.textContent='+';inc.title='Show only this share';
+    inc.onclick=ev=>{ev.stopPropagation();negShares.delete(sn);if(incShares.has(sn))incShares.delete(sn);else incShares.add(sn);syncShareChips();requestAnimationFrame(go);};
+    const exc=document.createElement('button');exc.className='ext-exc'+(negShares.has(sn)?' on':'');exc.textContent='\\u2715';exc.title='Hide this share';
+    exc.onclick=ev=>{ev.stopPropagation();incShares.delete(sn);if(negShares.has(sn))negShares.delete(sn);else negShares.add(sn);syncShareChips();requestAnimationFrame(go);};
+    row.appendChild(lbl);row.appendChild(ct);row.appendChild(inc);row.appendChild(exc);frag.appendChild(row);
+  });
+  if(!entries.length){const e=document.createElement('div');e.style.cssText='padding:12px 10px;font-size:11px;color:var(--tx-d);text-align:center';e.textContent='No shares found';frag.appendChild(e);}
+  list.innerHTML='';list.appendChild(frag);updateShareBtn();
+}
+function clearShareFilters(){incShares.clear();negShares.clear();paintShareChips();requestAnimationFrame(go);}
 function scheduleFilter(){clearTimeout(ft);exts.clear();negExts.clear();ft=setTimeout(go,150);}
 function scheduleHL(){clearTimeout(hlt);hlt=setTimeout(()=>{if(lastContent){document.getElementById('content').innerHTML=hl(lastContent);hitcount(lastContent);}},150);}
 function toggleFN(){
@@ -1447,9 +1611,11 @@ def start_gui(creds, pathsfile=''):
                     jobs[job_id]['status'] = 'error'
                     jobs[job_id]['note'] = 'timed out'
                 return
-            shares = parse_nxc(result.stdout, is_file=False)
+            shares, restricted_shares = parse_nxc_full(result.stdout, is_file=False)
+            with jobs_lock:
+                jobs[job_id]['restricted'] = restricted_shares
             if not shares:
-                note = 'no readable shares'
+                note = 'no readable shares' + (f' ({len(restricted_shares)} restricted)' if restricted_shares else '')
                 combined = (result.stderr + result.stdout).lower()
                 if 'logon_failure' in combined or 'logon failure' in combined or 'status_access_denied' in combined or ('authentication' in combined and 'fail' in combined):
                     note = 'authentication failed — check credentials'
@@ -1482,6 +1648,31 @@ def start_gui(creds, pathsfile=''):
                         fh.flush()
 
             setstatus('done')
+        except Exception as e:
+            with jobs_lock:
+                jobs[job_id]['status'] = 'error'
+                jobs[job_id]['note'] = str(e)
+
+    def bg_scan_share(job_id, share_path, use_proxy, dns=''):
+        try:
+            with jobs_lock:
+                jobs[job_id]['status'] = 'scanning'
+            new_paths = smbclient_ls(share_path, creds, use_proxy, dns_server=dns, timeout=600)
+            if new_paths:
+                with paths_lock:
+                    live_paths.extend(new_paths)
+                host_part = share_path.lstrip('/').split('/')[0] if '/' in share_path.lstrip('/') else share_path
+                safe = re.sub(r'[/\\: ]', '_', host_part)
+                outfile = f'smblist_{safe}'
+                with open(outfile, 'a') as fh:
+                    fh.write('\n'.join(new_paths) + '\n')
+                with jobs_lock:
+                    jobs[job_id]['found'] = len(new_paths)
+                    jobs[job_id]['current'] = new_paths[-1]
+            with jobs_lock:
+                jobs[job_id]['status'] = 'done'
+                if not new_paths:
+                    jobs[job_id]['note'] = 'no files found'
         except Exception as e:
             with jobs_lock:
                 jobs[job_id]['status'] = 'error'
@@ -1555,7 +1746,7 @@ def start_gui(creds, pathsfile=''):
                 with jobs_lock:
                     job_counter[0] += 1
                     job_id = str(job_counter[0])
-                    jobs[job_id] = {'host': host, 'status': 'queued', 'found': 0, 'note': '', 'current': ''}
+                    jobs[job_id] = {'host': host, 'status': 'queued', 'found': 0, 'note': '', 'current': '', 'restricted': []}
                 scan_queue.put((job_id, host, use_proxy, dns))
                 self.send_json({'ok': True, 'id': job_id})
 
@@ -1621,6 +1812,22 @@ def start_gui(creds, pathsfile=''):
 
             elif p.path == '/dlstatus':
                 self.send_json(dl_status[0])
+
+            elif p.path == '/scanshare':
+                share_path = qs.get('share', [''])[0].strip()
+                if not share_path:
+                    self.send_json({'ok': False, 'msg': 'no share'})
+                    return
+                with jobs_lock:
+                    job_counter[0] += 1
+                    job_id = str(job_counter[0])
+                    jobs[job_id] = {'host': share_path, 'status': 'queued', 'found': 0,
+                                    'note': '', 'current': '', 'restricted': [], 'share_scan': True}
+                dns = dns_server[0]
+                threading.Thread(target=bg_scan_share,
+                                 args=(job_id, share_path, use_proxy, dns),
+                                 daemon=True).start()
+                self.send_json({'ok': True, 'id': job_id})
 
             else:
                 self.send_response(404)
