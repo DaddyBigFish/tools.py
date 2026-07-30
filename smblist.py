@@ -10,11 +10,16 @@ Usage:
   smblist.py <creds> -get <//host/share/file>  - download a specific file
   smblist.py <creds> -gui [-dir <folder>]       - launch web gui (auto-loads smblist_* files)
   smblist.py <creds> [shares.txt] -o out.txt   - output to file and terminal
+  smblist.py <creds> -d <DOMAIN> ...           - set/override domain separately from creds
 
 creds: same format as smbclient -U  →  domain/user%pass
   CORP/jsmith%Password123       domain account
   ./localadmin%Pass1            local account  (use . for domain)
   CORP/guest%                   blank password
+
+-d <DOMAIN> can be combined with any mode above, e.g.:
+  smblist.py 'jsmith%Password123' -d CORP -gui
+  smblist.py 'jsmith%Password123' -d CORP -host hosts.txt
 """
 
 import sys, os, re, subprocess, threading, webbrowser, json, time, queue, urllib.request
@@ -42,15 +47,40 @@ def parse_smb_path(path):
     return share, os.path.dirname(filepath), os.path.basename(filepath)
 
 
-def run_cmd(cmd, use_proxy=False, timeout=None):
+def run_cmd(cmd, use_proxy=False, timeout=None, on_start=None, cancel_check=None):
+    """Runs cmd, polling so it can be killed early via cancel_check() (used by the GUI Stop button)."""
     if use_proxy:
         cmd = ['proxychains', '-q'] + cmd
     try:
-        return subprocess.run(cmd, capture_output=True, text=True,
-                              env={**os.environ, 'PROXYCHAINS_QUIET_MODE': '1'},
-                              timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(cmd, 1, stdout='', stderr='timed out')
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                 env={**os.environ, 'PROXYCHAINS_QUIET_MODE': '1'})
+    except Exception as e:
+        return subprocess.CompletedProcess(cmd, 1, stdout='', stderr=str(e))
+    if on_start:
+        on_start(proc)
+    start = time.time()
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=0.25)
+            return subprocess.CompletedProcess(cmd, proc.returncode, stdout=stdout, stderr=stderr)
+        except subprocess.TimeoutExpired:
+            if cancel_check and cancel_check():
+                proc.kill()
+                try:
+                    stdout, stderr = proc.communicate(timeout=3)
+                except Exception:
+                    stdout, stderr = '', ''
+                return subprocess.CompletedProcess(cmd, -1, stdout=stdout or '', stderr='cancelled')
+            if timeout is not None and (time.time() - start) > timeout:
+                proc.kill()
+                try:
+                    stdout, stderr = proc.communicate(timeout=3)
+                except Exception:
+                    stdout, stderr = '', ''
+                return subprocess.CompletedProcess(cmd, 1, stdout=stdout or '', stderr='timed out')
+
+
+_PERM_RE = re.compile(r'\b((?:READ|WRITE|EXEC)(?:,(?:READ|WRITE|EXEC))*)\b')
 
 
 def parse_nxc_full(source, is_file=True):
@@ -70,19 +100,39 @@ def parse_nxc_full(source, is_file=True):
         im = re.search(r'SMB\s+([\d.]+)', line)
         if not im:
             continue
-        m = re.match(r'SMB\s+[\d.]+\s+\d+\s+\S+\s+(\S+)', line)
+        m = re.match(r'SMB\s+[\d.]+\s+\d+\s+\S+\s+(.+)', line)
         if not m:
             continue
-        token = m.group(1)
-        if token.startswith('[') or token in ('Share', 'Permissions', 'Remark') or token.startswith('-'):
+        rest = m.group(1).rstrip('\r\n')
+        stripped = rest.strip()
+        if not stripped:
             continue
-        share = token
+        first_word = stripped.split(None, 1)[0]
+        if first_word.startswith('[') or first_word in ('Share', 'Permissions', 'Remark') or first_word.startswith('-'):
+            continue
+        # netexec pads the share/permissions/remark columns to the width of the
+        # longest entry *for that host* — when a share name is at/near that width
+        # the gap can shrink to a single space, so we can't split on whitespace
+        # runs alone. Anchor on the permissions token itself instead (a fixed,
+        # known vocabulary) and treat everything before it as the share name.
+        perm_m = _PERM_RE.search(rest)
+        if perm_m:
+            share = rest[:perm_m.start()].strip()
+            has_read = 'READ' in perm_m.group(1).split(',')
+        else:
+            # no permissions shown at all (blank access) — fall back to splitting
+            # on wide gaps to separate the share name from any remark text
+            cols = re.split(r'\s{2,}', stripped)
+            share = cols[0]
+            has_read = False
+        if not share:
+            continue
         host = hostmap.get(im.group(1), im.group(1))
         share_path = '//' + host + '/' + share
         if share_path in seen:
             continue
         seen.add(share_path)
-        if share == 'IPC$' or 'READ' not in line:
+        if share == 'IPC$' or not has_read:
             restricted.append(share_path)
         else:
             readable.append(share_path)
@@ -110,7 +160,10 @@ def resolve_host(host, dns_server):
     return host
 
 
-def smbclient_ls(share, creds, proxy=False, dns_server='', timeout=120):
+def smbclient_ls(share, creds, proxy=False, dns_server='', timeout=120, on_start=None, cancel_check=None):
+    """Returns (paths, error). error is None on success/empty-but-fine, else a short diagnostic string."""
+    if cancel_check and cancel_check():
+        return [], None
     share_cmd = share
     if dns_server:
         parts = share.split('/', 3)
@@ -118,7 +171,8 @@ def smbclient_ls(share, creds, proxy=False, dns_server='', timeout=120):
             ip = resolve_host(parts[2], dns_server)
             if ip != parts[2]:
                 share_cmd = f'//{ip}/{parts[3]}' if len(parts) > 3 else f'//{ip}/'
-    result = run_cmd(['smbclient', share_cmd, '-U', creds, '-c', 'recurse;ls'], proxy, timeout=timeout)
+    result = run_cmd(['smbclient', share_cmd, '-U', creds, '-c', 'recurse;ls'], proxy, timeout=timeout,
+                      on_start=on_start, cancel_check=cancel_check)
     paths = []
     seen = set()
     current_path = ''
@@ -137,55 +191,77 @@ def smbclient_ls(share, creds, proxy=False, dns_server='', timeout=120):
             if full not in seen:
                 seen.add(full)
                 paths.append(full)
-    return paths
+    err = None
+    if not paths:
+        stderr = (result.stderr or '').strip()
+        if stderr == 'cancelled':
+            err = None
+        elif stderr == 'timed out':
+            err = 'timed out'
+        else:
+            combined = stderr + '\n' + (result.stdout or '')
+            m = re.search(r'NT_STATUS_\w+', combined)
+            if m:
+                err = m.group(0)
+            elif stderr:
+                err = stderr.splitlines()[-1][:120]
+    return paths, err
 
 
 def run_smblist(shares, creds, outfile=None, proxy=False):
-    fh = open(outfile, 'a') if outfile else None
+    """Returns the number of paths found. Only creates/writes outfile if something is actually found."""
+    fh = None
+    found = 0
     try:
         for share in shares:
             share = share.strip()
             if not share:
                 continue
-            paths = smbclient_ls(share, creds, proxy)
+            paths, err = smbclient_ls(share, creds, proxy)
             if not paths:
-                print(f'[-] no files found (timeout, access denied, or empty): {share}', file=sys.stderr)
+                reason = err or 'timeout, access denied, or empty'
+                print(f'No files found ({reason}): {share}', file=sys.stderr)
             for p in paths:
                 print(p)
-                if fh:
+                if outfile:
+                    if fh is None:
+                        fh = open(outfile, 'w')
                     fh.write(p + '\n')
+                found += 1
     finally:
         if fh:
             fh.close()
+    return found
 
 
 def download_file(fullpath, creds, proxy=False):
     share, d, fname = parse_smb_path(fullpath)
-    print(f'[*] Downloading: {fname}')
-    print(f'[*] From: {share}{d}')
+    print(f'Downloading: {fname}')
+    print(f'From: {share}{d}')
     run_cmd(['smbclient', share, '-U', creds, '-c', f'cd "{d}"; get "{fname}"'], proxy)
     if os.path.exists(fname):
-        print(f'[+] Saved: {os.getcwd()}/{fname}')
+        print(f'Saved: {os.getcwd()}/{fname}')
     else:
-        print(f'[-] Failed: {fname}')
+        print(f'Failed: {fname}')
 
 
 def run_host(target, creds, user, passwd, domain, proxy=False):
     safe = target.replace('/', '_')
     outfile = f'smblist_{safe}'
-    print(f'[*] Running nxc against {target}', file=sys.stderr)
+    print(f'Running nxc against {target}', file=sys.stderr)
     result = run_cmd(
         ['netexec', 'smb', target, '-u', user, '-p', passwd, '-d', domain, '--shares'],
         proxy
     )
     shares = parse_nxc(result.stdout, is_file=False)
     if not shares:
-        print(f'[-] No readable shares found for {target}', file=sys.stderr)
+        print(f'No readable shares found for {target}', file=sys.stderr)
         return
-    print(f'[*] Saving to {outfile}', file=sys.stderr)
-    open(outfile, 'w').close()
-    run_smblist(shares, creds, outfile=outfile, proxy=proxy)
-    print(f'[+] Done: {outfile}', file=sys.stderr)
+    found = run_smblist(shares, creds, outfile=outfile, proxy=proxy)
+    if found:
+        print(f'Done: {outfile} ({found} paths)', file=sys.stderr)
+    else:
+        print(f'No files found for {target}', file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -213,9 +289,10 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
 ::-webkit-scrollbar-thumb:hover{background:var(--tx-d)}
 /* === toolbar === */
 #top{padding:0 14px;border-bottom:1px solid var(--bd-s);display:flex;gap:5px;align-items:center;background:var(--bg2);flex-shrink:0;height:46px;overflow:hidden}
-#brand{display:flex;align-items:center;gap:8px;margin-right:6px;flex-shrink:0}
-#brand-mark{width:24px;height:24px;border-radius:6px;background:var(--ac);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#fff;letter-spacing:-.05em;flex-shrink:0}
-#brand-name{font-size:13px;font-weight:700;color:var(--tx);letter-spacing:-.02em}
+#brand{display:flex;align-items:center;gap:9px;margin-right:6px;flex-shrink:0}
+#brand-mark{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,var(--ac) 0%,#1c56b0 100%);display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0;box-shadow:0 1px 2px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.12)}
+#brand-mark svg{width:14px;height:14px;display:block}
+#brand-name{font-size:13.5px;font-weight:700;color:var(--tx);letter-spacing:-.01em}
 .t-sep{width:1px;background:var(--bd-s);height:22px;margin:0 3px;flex-shrink:0}
 .t-lbl{font-size:11px;color:var(--tx-d);white-space:nowrap;flex-shrink:0;font-weight:500}
 .t-grp{display:flex;align-items:center;gap:4px;flex-shrink:0}
@@ -228,6 +305,8 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
 .btn.active{background:var(--ac-bg);border-color:var(--ac);color:var(--ac-tx)}
 .btn-accent{background:var(--ac-bg);border-color:var(--ac);color:var(--ac-tx)}
 .btn-accent:hover{background:var(--ac);color:#fff}
+.btn-danger{background:var(--bg3);border-color:rgba(248,81,73,.35);color:var(--red)}
+.btn-danger:hover{background:var(--red);border-color:var(--red);color:#fff}
 .cb-lbl{font-size:12px;color:var(--tx-m);display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap;flex-shrink:0;font-weight:500}
 .cb-lbl input[type=checkbox]{accent-color:var(--ac);cursor:pointer;width:13px;height:13px}
 
@@ -375,7 +454,7 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
 
 /* === misc === */
 .hl{background:rgba(227,179,65,.2);color:var(--yellow);border-radius:2px}
-.ok{color:var(--green)}.err{color:var(--red)}
+.ok{color:var(--green)}.err{color:var(--red)}.warn{color:var(--yellow)}
 
 /* === context menu === */
 .cmenu{position:fixed;background:var(--bg3);border:1px solid var(--bd);border-radius:8px;padding:4px 0;z-index:9999;min-width:150px;box-shadow:0 8px 30px rgba(0,0,0,.6),0 2px 8px rgba(0,0,0,.4)}
@@ -402,15 +481,15 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
     <div class=modal-sub id=dlmodal-sub>Select a destination folder</div>
     <div class=modal-foot>
       <button class=btn onclick=closeDlModal()>Cancel</button>
-      <button class=btn onclick=startDlAll(false)>Download Folder</button>
-      <button class="btn btn-accent" onclick=startDlAll(true)>Extension Folder</button>
+      <button class=btn onclick=startDlAll(false)>Single Folder</button>
+      <button class="btn btn-accent" onclick=startDlAll(true)>Group by File Type</button>
     </div>
   </div>
 </div>
 <div id=hostmodal style="display:none" class=modal-overlay onclick="if(event.target===this)closeHostModal()">
   <div class=modal>
     <div class=modal-title>Scan Multiple Hosts</div>
-    <div class=modal-sub>One Host / FQDN / CIDR per Line</div>
+    <div class=modal-sub>One host, FQDN, or CIDR per line</div>
     <textarea id=hostlist placeholder="host1.domain.com&#10;host2.domain.com&#10;192.168.1.0/24"></textarea>
     <div class=modal-foot>
       <button class=btn onclick=closeHostModal()>Cancel</button>
@@ -418,9 +497,24 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
     </div>
   </div>
 </div>
+<div id=promptmodal style="display:none" class=modal-overlay onclick="if(event.target===this)closePromptModal()">
+  <div class=modal>
+    <div class=modal-title id=promptmodal-title>Rename</div>
+    <input type=text class=tbi id=promptmodal-input style="width:100%" onkeydown="if(event.key==='Enter')submitPromptModal()">
+    <div class=modal-foot>
+      <button class=btn onclick=closePromptModal()>Cancel</button>
+      <button class="btn btn-accent" onclick=submitPromptModal()>Save</button>
+    </div>
+  </div>
+</div>
 <div id=top>
   <div id=brand>
-    <div id=brand-mark>sm</div>
+    <div id=brand-mark><svg viewBox="0 0 24 24" fill=none xmlns="http://www.w3.org/2000/svg">
+      <rect x=3 y=3 width=7.5 height=7.5 rx=1.8 fill="currentColor"/>
+      <rect x=13.5 y=3 width=7.5 height=7.5 rx=1.8 fill="currentColor" opacity=.5/>
+      <rect x=3 y=13.5 width=7.5 height=7.5 rx=1.8 fill="currentColor" opacity=.5/>
+      <rect x=13.5 y=13.5 width=7.5 height=7.5 rx=1.8 fill="currentColor"/>
+    </svg></div>
     <span id=brand-name>smblist</span>
   </div>
   <div class=t-sep></div>
@@ -428,7 +522,9 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
     <span class=t-lbl>Domain:</span>
     <input type=text class=tbi id=hostinput placeholder="FQDN" onkeydown="if(event.key==='Enter')addHost()">
     <button class="btn btn-accent" onclick=addHost()>Get Shares</button>
-    <button class=btn onclick=openHostModal() title="Scan a list of hosts">Paste List</button>
+    <button class=btn onclick=openHostModal() title="Scan a list of hosts">Paste Hosts</button>
+    <label class=btn for=hostfileinput title="Import hosts from a file (one per line)" style="display:inline-flex;align-items:center">Import Hosts</label>
+    <input type=file id=hostfileinput style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0" onchange=handleHostFile(event)>
   </div>
   <div class=t-sep></div>
   <div class=t-grp>
@@ -436,23 +532,24 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
     <input type=text class=tbi id=dnsinput placeholder="DC IP / FQDN" style="width:130px" oninput=updateDns()>
   </div>
   <div class=t-sep></div>
-  <label class=cb-lbl><input type=checkbox id=useProxy checked> Proxychains</label>
   <button class="btn active" id=fnbtn onclick=toggleFN()>Filename Only</button>
   <button class=btn id=unbtn onclick=toggleUN()>Unique Names</button>
-  <button class=btn onclick=clearRight()>Clear</button>
+  <button class=btn onclick=clearRight()>Clear Preview</button>
+  <div class=t-sep></div>
+  <button class="btn btn-danger" id=stopbtn onclick=stopAll() title="Cancel all queued and running scans">Stop All</button>
 </div>
 <div id=jobspanel></div>
 <div id=main>
   <div id=hosttree>
     <div id=treeheader>
       <span>Hosts</span>
-      <button onclick=addGroup()>+ Group</button>
+      <button onclick=addGroup()>+ New Group</button>
     </div>
     <div id=treesel>
       <span id=treeselcount></span>
       <select id=treeseldest></select>
       <button class=btn style="padding:3px 10px;font-size:11px" onclick=addSelectedToGroup()>Add to Group</button>
-      <button class=btn style="padding:3px 8px;font-size:11px" onclick=clearSel()>✕ Clear</button>
+      <button class=btn style="padding:3px 8px;font-size:11px" onclick=clearSel()>Clear Selection</button>
     </div>
     <div id=treebody></div>
   </div>
@@ -652,6 +749,7 @@ const EXT_DESC={
 const ROW_H=20;
 let all=[],cur=null,ft=null,hlt=null,lastContent='',filtered=[],displayed=[],exts=new Set(),negExts=new Set(),fnOnly=true,uniqueNames=false;
 let allRestrictedByHost={};
+let allReadableByHost={};
 function extractRestricted(jobdata){
   // any share we actually enumerated files from is readable — don't show it as restricted
   const accessible=new Set(allPaths.map(p=>{const parts=p.split('/');return parts.slice(0,4).join('/');}));
@@ -659,6 +757,16 @@ function extractRestricted(jobdata){
   Object.values(jobdata).forEach(j=>{
     (j.restricted||[]).forEach(sp=>{
       if(accessible.has(sp))return;
+      const m=sp.match(/^\\/\\/([^/]+)/);
+      if(m){const h=m[1];if(!byHost[h])byHost[h]=[];if(!byHost[h].includes(sp))byHost[h].push(sp);}
+    });
+  });
+  return byHost;
+}
+function extractReadable(jobdata){
+  const byHost={};
+  Object.values(jobdata).forEach(j=>{
+    (j.readable||[]).forEach(sp=>{
       const m=sp.match(/^\\/\\/([^/]+)/);
       if(m){const h=m[1];if(!byHost[h])byHost[h]=[];if(!byHost[h].includes(sp))byHost[h].push(sp);}
     });
@@ -701,7 +809,7 @@ function saveGroups(){
 // extract unique hostnames from paths in sorted order
 function hostsFromPaths(paths){
   const s=new Set();
-  paths.forEach(p=>{const m=p.match(/^\/\/([^/]+)/);if(m)s.add(m[1]);});
+  paths.forEach(p=>{const h=pmeta(p).host;if(h)s.add(h);});
   return [...s].sort();
 }
 
@@ -720,12 +828,13 @@ function loadPaths(){
   ]).then(([paths,grps])=>{
     groups=grps;allPaths=paths;all=paths;exts.clear();negExts.clear();
     try{go();}catch(e){console.error('go:',e);}renderTree();
+    warmCaches();
   });
 }
 loadPaths();
 fetch('/extdescs').then(r=>r.json()).then(d=>{_fileDescs=d;}).catch(()=>{});
 fetch('/jobs').then(r=>r.json()).then(d=>{
-  allJobs=d;allRestrictedByHost=extractRestricted(d);renderJobs(d);renderTree();
+  allJobs=d;allRestrictedByHost=extractRestricted(d);allReadableByHost=extractReadable(d);renderJobs(d);renderTree();
   if(Object.values(d).some(j=>j.status!=='done'&&j.status!=='error'))startPolling();
 });
 
@@ -737,8 +846,8 @@ function addHost(){
   fetch('/addhost?host='+encodeURIComponent(h)+'&proxy='+proxy()+'&dns='+encodeURIComponent(dnsVal()))
     .then(r=>r.json()).then(d=>{
       if(d.ok){document.getElementById('hostinput').value='';startPolling();poll();}
-      else if(d.skip)document.getElementById('status').innerHTML='<span class=err>[!] '+esc(d.msg)+'</span>';
-      else document.getElementById('status').innerHTML='<span class=err>[-] '+esc(d.msg)+'</span>';
+      else if(d.skip)document.getElementById('status').innerHTML='<span class=warn>'+esc(d.msg)+'</span>';
+      else document.getElementById('status').innerHTML='<span class=err>'+esc(d.msg)+'</span>';
     });
 }
 function openHostModal(){
@@ -754,14 +863,38 @@ function submitHostList(){
     .split(/[\\n,]+/).map(h=>h.trim()).filter(Boolean);
   if(!hosts.length)return;
   closeHostModal();
-  document.getElementById('status').textContent='[*] Queuing '+hosts.length+' host(s)...';
+  queueHosts(hosts);
+}
+function handleHostFile(e){
+  const file=e.target.files[0];
+  e.target.value=''; // allow re-selecting the same file later
+  if(!file)return;
+  const reader=new FileReader();
+  reader.onload=()=>{
+    const hosts=String(reader.result)
+      .split(/[\\r\\n,]+/).map(h=>h.trim()).filter(h=>h&&!h.startsWith('#'));
+    if(!hosts.length){
+      document.getElementById('status').innerHTML='<span class=err>No hosts found in file</span>';
+      return;
+    }
+    queueHosts(hosts);
+  };
+  reader.onerror=()=>{document.getElementById('status').innerHTML='<span class=err>Failed to read file</span>';};
+  reader.readAsText(file);
+}
+let stopRequested=false;
+function queueHosts(hosts){
+  if(!hosts.length)return;
+  stopRequested=false;
+  document.getElementById('status').textContent='Queuing '+hosts.length+' host(s)...';
   let queued=0,skipped=0,pollingStarted=false;
   function next(i){
-    if(i>=hosts.length){
+    if(stopRequested||i>=hosts.length){
       const parts=[];
-      if(queued>0)parts.push(queued+' Queued');
-      if(skipped>0)parts.push(skipped+' Already Scanned');
-      if(parts.length)document.getElementById('status').textContent='[*] '+parts.join(', ');
+      if(queued>0)parts.push(queued+' queued');
+      if(skipped>0)parts.push(skipped+' already scanned');
+      if(stopRequested)parts.push('stopped');
+      if(parts.length)document.getElementById('status').textContent=parts.join(', ');
       return;
     }
     fetch('/addhost?host='+encodeURIComponent(hosts[i])+'&proxy='+proxy()+'&dns='+encodeURIComponent(dnsVal()))
@@ -775,7 +908,17 @@ function submitHostList(){
   }
   next(0);
 }
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeHostModal();closeDlModal();}});
+function stopAll(){
+  stopRequested=true;
+  document.getElementById('status').innerHTML='<span class=warn>Stopping...</span>';
+  fetch('/stopall').then(r=>r.json()).then(d=>{
+    document.getElementById('status').innerHTML='<span class=warn>Stopped '+(d.cancelled||0)+' job(s)</span>';
+    poll();
+  }).catch(()=>{
+    document.getElementById('status').innerHTML='<span class=err>Stop request failed</span>';
+  });
+}
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeHostModal();closeDlModal();closePromptModal();}});
 
 // ── polling ──
 function startPolling(){if(pollTimer)return;pollTimer=setInterval(poll,2000);}
@@ -786,7 +929,8 @@ function poll(){
     fetch('/paths').then(r=>r.json()),
     fetch('/jobs').then(r=>r.json())
   ]).then(([newPaths,jobdata])=>{
-    allJobs=jobdata;allRestrictedByHost=extractRestricted(jobdata);allPaths=newPaths;
+    allJobs=jobdata;allRestrictedByHost=extractRestricted(jobdata);allReadableByHost=extractReadable(jobdata);allPaths=newPaths;
+    warmCaches();
     renderJobs(jobdata);
     const treeSig=newPaths.length+'|'+(newPaths[newPaths.length-1]||'');
     if(treeSig!==_lastTreeSig){_lastTreeSig=treeSig;renderTree();}
@@ -876,12 +1020,29 @@ function renderJobs(jobdata){
 
 // ── tree rendering ──
 let _hostPathCounts={};
+let _hostShareMap={};
 function renderTree(){
   const hosts=hostsFromPaths(allPaths);
   const ug=ungroupedHosts(hosts);
   // build count map once — O(paths) instead of O(hosts*paths)
   _hostPathCounts={};
-  allPaths.forEach(p=>{const m=p.match(/^\/\/([^/]+)/);if(m)_hostPathCounts[m[1]]=(_hostPathCounts[m[1]]||0)+1;});
+  const hostShareSets={};
+  allPaths.forEach(p=>{
+    const meta=pmeta(p);
+    if(!meta.host)return;
+    const h=meta.host;
+    _hostPathCounts[h]=(_hostPathCounts[h]||0)+1;
+    if(meta.share)(hostShareSets[h]||(hostShareSets[h]=new Set())).add(meta.share);
+  });
+  Object.keys(allReadableByHost).forEach(h=>{
+    const set=hostShareSets[h]||(hostShareSets[h]=new Set());
+    allReadableByHost[h].forEach(sp=>{
+      const parts=sp.split('/').filter(Boolean);
+      if(parts[1])set.add(parts[1]);
+    });
+  });
+  _hostShareMap={};
+  Object.keys(hostShareSets).forEach(h=>{_hostShareMap[h]=[...hostShareSets[h]].sort();});
   const body=document.getElementById('treebody');
   body.innerHTML='';
 
@@ -901,6 +1062,24 @@ function renderTree(){
   }
 }
 
+// selection/pick highlighting only — no DOM rebuild. Safe whenever activeFilter
+// or selectedHosts changes but the host/group/share structure itself hasn't
+// (a full renderTree() rebuilds every host + share row, which is expensive
+// once there are many hosts — most clicks only change which one is selected).
+function updateTreeHighlights(){
+  const body=document.getElementById('treebody');
+  if(!body)return;
+  body.querySelectorAll('.tall').forEach(el=>el.classList.toggle('sel',activeFilter===null));
+  body.querySelectorAll('.tghead').forEach(el=>{
+    el.classList.toggle('sel',!!(activeFilter&&activeFilter.type==='group'&&activeFilter.groupId===el.dataset.groupid));
+  });
+  body.querySelectorAll('.thost').forEach(el=>{
+    const h=el.dataset.hostname;
+    el.classList.toggle('sel',!!(activeFilter&&activeFilter.type==='host'&&activeFilter.hostname===h));
+    el.classList.toggle('pick',selectedHosts.has(h));
+  });
+}
+
 function makeGroupEl(group){
   const wrap=document.createElement('div');
   wrap.className='tgroup';
@@ -908,6 +1087,7 @@ function makeGroupEl(group){
   const isSel=activeFilter&&activeFilter.type==='group'&&activeFilter.groupId===group.id;
   const head=document.createElement('div');
   head.className='tghead'+(isSel?' sel':'');
+  head.dataset.groupid=group.id;
 
   // drop target
   head.addEventListener('dragover',e=>{e.preventDefault();head.classList.add('dragover');});
@@ -975,7 +1155,7 @@ function makeUngroupedEl(hosts){
   return wrap;
 }
 
-function clearSel(){selectedHosts.clear();lastSelHost=null;updateSelBar();renderTree();}
+function clearSel(){selectedHosts.clear();lastSelHost=null;updateSelBar();updateTreeHighlights();}
 function updateSelBar(){
   const bar=document.getElementById('treesel');
   if(selectedHosts.size===0){bar.style.display='none';return;}
@@ -1003,29 +1183,20 @@ function addSelectedToGroup(){
   saveGroups();clearSel();
 }
 
-function getHostShares(hostname){
-  const prefix='//'+hostname+'/';
-  const readableSet=new Set();
-  allPaths.forEach(p=>{if(p.startsWith(prefix)){const parts=p.split('/');if(parts[3])readableSet.add(parts[3]);}});
-  const restricted=(allRestrictedByHost[hostname]||[]).filter(sp=>{
-    const n=sp.split('/').filter(Boolean).pop();
-    return n&&n!=='IPC$'&&!readableSet.has(n);
-  });
-  return{readable:[...readableSet].sort(),restricted};
-}
 function filterToShare(hostname,shareName){
   activeFilter={type:'host',hostname};
   exts.clear();negExts.clear();
   incShares.clear();negShares.clear();
   incShares.add(shareName);
   syncShareChips();updateShareBtn();
-  renderTree();requestAnimationFrame(applyFilter);
+  updateTreeHighlights();requestAnimationFrame(applyFilter);
 }
 function makeHostEl(hostname,pathCount,sourceGroupId){
   const isSel=activeFilter&&activeFilter.type==='host'&&activeFilter.hostname===hostname;
   const isPick=selectedHosts.has(hostname);
   const div=document.createElement('div');
   div.className='thost'+(isSel?' sel':'')+(isPick?' pick':'');
+  div.dataset.hostname=hostname;
   div.draggable=true;
   div.addEventListener('dragstart',e=>{
     dragState={hostname,sourceGroupId};
@@ -1067,26 +1238,17 @@ function makeHostEl(hostname,pathCount,sourceGroupId){
   const wrap=document.createElement('div');
   wrap.className='thostwrap';
   wrap.appendChild(div);
-  const{readable,restricted}=getHostShares(hostname);
-  const allShares=[
-    ...readable.map(n=>({name:n,readable:true})),
-    ...restricted.map(sp=>({name:sp.split('/').filter(Boolean).pop()||sp,path:sp,readable:false}))
-  ];
-  if(allShares.length>0){
+  const readable=_hostShareMap[hostname]||[];
+  if(readable.length>0){
     const rList=document.createElement('div');rList.className='trs-list';
-    allShares.forEach(share=>{
+    readable.forEach(name=>{
       const row=document.createElement('div');row.className='trs-row';
       const snm=document.createElement('span');
-      snm.className='trs-name'+(share.readable?' trs-readable':'');
-      snm.textContent=share.name;
-      snm.title=share.readable?'Filter to '+share.name:(share.path||share.name);
-      if(share.readable)snm.onclick=e=>{e.stopPropagation();filterToShare(hostname,share.name);};
+      snm.className='trs-name trs-readable';
+      snm.textContent=name;
+      snm.title='Filter to '+name;
+      snm.onclick=e=>{e.stopPropagation();filterToShare(hostname,name);};
       row.appendChild(snm);
-      if(!share.readable){
-        const btn=document.createElement('button');btn.className='btn trs-scan';btn.textContent='Scan';
-        btn.onclick=e=>{e.stopPropagation();scanRestrictedShare(share.path,btn);};
-        row.appendChild(btn);
-      }
       rList.appendChild(row);
     });
     wrap.appendChild(rList);
@@ -1126,33 +1288,87 @@ function dropOnGroup(targetGroupId){
 // ── filter ──
 function setFilter(f){
   activeFilter=f;exts.clear();negExts.clear();incShares.clear();negShares.clear();
-  syncShareChips();updateShareBtn();renderTree();requestAnimationFrame(applyFilter);
+  syncShareChips();updateShareBtn();updateTreeHighlights();requestAnimationFrame(applyFilter);
 }
 
-function applyFilter(){
-  if(!activeFilter){all=allPaths;go();return;}
+// per-host path lists, both in raw (scan) order and in name-sorted order — lets
+// switching to a single host be an O(1) lookup instead of an O(allPaths) scan.
+// Rebuilt only when allPaths itself changes (same cache-by-reference trick as
+// getSortedAllPaths).
+// the sort cache and host index are otherwise built lazily on whichever click
+// happens to need them first — meaning that click (and only that one) pays the
+// full O(n) cost, then everything after is instant. Warm both proactively as
+// soon as new data lands (in browser idle time, so it never blocks rendering)
+// so the first real click doesn't have to pay for it.
+function warmCaches(){
+  const run=()=>{getSortedAllPaths();ensureHostIndex();};
+  if(window.requestIdleCallback)requestIdleCallback(run,{timeout:1500});
+  else setTimeout(run,0);
+}
+let _hostIndexRaw=null,_hostIndexSorted=null,_hostIndexRef=null;
+function ensureHostIndex(){
+  if(_hostIndexRef===allPaths)return;
+  const raw={};
+  allPaths.forEach(p=>{const h=pmeta(p).host;if(h)(raw[h]||(raw[h]=[])).push(p);});
+  const sorted={};
+  getSortedAllPaths().forEach(p=>{const h=pmeta(p).host;if(h)(sorted[h]||(sorted[h]=[])).push(p);});
+  _hostIndexRaw=raw;_hostIndexSorted=sorted;_hostIndexRef=allPaths;
+}
+// applies the current host/group scope to any source array (raw or presorted) —
+// filter() preserves relative order, so scoping a presorted array yields a
+// presorted result without re-sorting. Host scoping specifically uses the
+// prebuilt index above instead of scanning source, since source is always
+// either allPaths or getSortedAllPaths() (the only two call sites below).
+function scopeFilter(source){
+  if(!activeFilter)return source;
   if(activeFilter.type==='host'){
-    all=allPaths.filter(p=>p.startsWith('//'+activeFilter.hostname+'/'));
-  } else if(activeFilter.type==='group'){
-    const g=groups.find(x=>x.id===activeFilter.groupId);
-    if(!g){activeFilter=null;all=allPaths;go();return;}
-    all=allPaths.filter(p=>g.hostnames.some(h=>p.startsWith('//'+h+'/')));
+    ensureHostIndex();
+    const idx=source===allPaths?_hostIndexRaw:_hostIndexSorted;
+    return idx[activeFilter.hostname]||[];
   }
+  if(activeFilter.type==='group'){
+    const g=groups.find(x=>x.id===activeFilter.groupId);
+    if(!g)return source;
+    return source.filter(p=>g.hostnames.some(h=>p.startsWith('//'+h+'/')));
+  }
+  return source;
+}
+function applyFilter(){
+  if(activeFilter&&activeFilter.type==='group'&&!groups.find(x=>x.id===activeFilter.groupId)){
+    activeFilter=null;
+  }
+  all=scopeFilter(allPaths);
   go();
 }
 
 // ── group management ──
+let _promptCb=null;
+function showPrompt(title,defVal,cb){
+  document.getElementById('promptmodal-title').textContent=title;
+  const inp=document.getElementById('promptmodal-input');
+  inp.value=defVal||'';
+  _promptCb=cb;
+  document.getElementById('promptmodal').style.display='flex';
+  setTimeout(()=>{inp.focus();inp.select();},0);
+}
+function closePromptModal(){document.getElementById('promptmodal').style.display='none';_promptCb=null;}
+function submitPromptModal(){
+  const val=document.getElementById('promptmodal-input').value.trim();
+  const cb=_promptCb;
+  closePromptModal();
+  if(val&&cb)cb(val);
+}
 function addGroup(){
-  const name=prompt('Group name:');
-  if(!name||!name.trim())return;
-  groups.push({id:'g'+Date.now(),name:name.trim().toUpperCase(),hostnames:[],collapsed:false});
-  saveGroups();renderTree();
+  showPrompt('New Group Name','',name=>{
+    groups.push({id:'g'+Date.now(),name:name.toUpperCase(),hostnames:[],collapsed:false});
+    saveGroups();renderTree();
+  });
 }
 function renameGroup(id){
   const g=groups.find(x=>x.id===id);if(!g)return;
-  const name=prompt('Rename:',g.name);
-  if(!name||!name.trim())return;
-  g.name=name.trim().toUpperCase();saveGroups();renderTree();
+  showPrompt('Rename Group',g.name,name=>{
+    g.name=name.toUpperCase();saveGroups();renderTree();
+  });
 }
 function deleteGroup(id){
   groups=groups.filter(x=>x.id!==id);
@@ -1208,25 +1424,48 @@ function showGroupMenu(e,groupId){
 })();
 
 // ── path list ──
-function getExt(p){const m=p.match(/\\.([a-zA-Z0-9]+)$/);return m?m[1].toLowerCase():null;}
+// per-path metadata (basename lowercase, extension, host, share) is expensive to
+// re-derive with regex/split — and go() reruns on every filter/share/ext click, not
+// just on data load — so compute each unique path's metadata once and reuse it.
+const _pathMeta=new Map();
+function pmeta(p){
+  let m=_pathMeta.get(p);
+  if(!m){
+    const name=p.split('/').pop()||p;
+    const em=name.match(/\\.([a-zA-Z0-9]+)$/);
+    const sm=p.match(/^\\/\\/([^/]+)\\/([^/]+)/);
+    m={nameLower:name.toLowerCase(),ext:em?em[1].toLowerCase():null,host:sm?sm[1]:null,share:sm?sm[2]:null};
+    _pathMeta.set(p,m);
+  }
+  return m;
+}
+function getExt(p){return pmeta(p).ext;}
+// allPaths sorted by basename is the single most expensive thing go() used to
+// redo on every keystroke/click (O(n log n) over the whole "all" view — the
+// worst case being the unfiltered "all" scope itself). Sort once per data
+// change and cache it; scopeFilter()/val/share/ext filters below are all
+// order-preserving, so a presorted source stays sorted through every stage
+// with no re-sort needed.
+let _sortedAllPaths=null,_sortedAllPathsRef=null;
+function getSortedAllPaths(){
+  if(_sortedAllPathsRef!==allPaths){
+    _sortedAllPaths=allPaths.slice().sort((a,b)=>{
+      const ka=pmeta(a).nameLower,kb=pmeta(b).nameLower;
+      return ka<kb?-1:ka>kb?1:0;
+    });
+    _sortedAllPathsRef=allPaths;
+  }
+  return _sortedAllPaths;
+}
 function go(){
   const val=document.getElementById('filterpath').value.trim();
-  let tf=all;
-  if(val){const terms=val.toLowerCase().split(',').map(t=>t.trim()).filter(Boolean);tf=all.filter(p=>{const target=fnOnly?(p.split('/').pop()||p).toLowerCase():p.toLowerCase();return terms.some(t=>target.includes(t));});}
+  let tf=fnOnly?scopeFilter(getSortedAllPaths()):all;
+  if(val){const terms=val.toLowerCase().split(',').map(t=>t.trim()).filter(Boolean);tf=tf.filter(p=>{const target=fnOnly?pmeta(p).nameLower:p.toLowerCase();return terms.some(t=>target.includes(t));});}
   rebuildShares(tf);
-  if(incShares.size>0||negShares.size>0){tf=tf.filter(p=>{const m=p.match(/^\\/\\/[^/]+\\/([^/]+)/);if(!m)return true;const sn=m[1];if(negShares.has(sn))return false;return incShares.size===0||incShares.has(sn);});}
+  if(incShares.size>0||negShares.size>0){tf=tf.filter(p=>{const sn=pmeta(p).share;if(!sn)return true;if(negShares.has(sn))return false;return incShares.size===0||incShares.has(sn);});}
   rebuildExts(tf);
-  let out;
-  if(fnOnly){
-    const keyed=tf.map(p=>[(p.split('/').pop()||p).toLowerCase(),p]);
-    keyed.sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:0);
-    out=exts.size>0?keyed.filter(([,p])=>{const e=getExt(p);return e&&exts.has(e);}):keyed;
-    if(negExts.size>0)out=out.filter(([,p])=>{const e=getExt(p);return !e||!negExts.has(e);});
-    out=out.map(k=>k[1]);
-  }else{
-    out=exts.size>0?tf.filter(p=>{const e=getExt(p);return e&&exts.has(e);}):tf;
-    if(negExts.size>0)out=out.filter(p=>{const e=getExt(p);return !e||!negExts.has(e);});
-  }
+  let out=exts.size>0?tf.filter(p=>{const e=pmeta(p).ext;return e&&exts.has(e);}):tf;
+  if(negExts.size>0)out=out.filter(p=>{const e=pmeta(p).ext;return !e||!negExts.has(e);});
   filtered=out;
   render(out);
 }
@@ -1235,7 +1474,7 @@ function toggleExtDrop(e){
   const d=document.getElementById('extdrop');
   const willOpen=!d.classList.contains('open');
   d.classList.toggle('open',willOpen);
-  if(willOpen)document.getElementById('extsearch').focus();
+  if(willOpen){computeExtCounts(_extCountSrc);paintExtChips();document.getElementById('extsearch').focus();}
 }
 document.addEventListener('click',function(e){
   const w=document.getElementById('extdrop-wrap');
@@ -1269,9 +1508,13 @@ function syncExtChips(){
   });
   updateExtBtn();
 }
-function rebuildExts(paths){
+// counting extensions is itself an O(paths) pass — same story as painting:
+// almost always wasted since the dropdown is almost always closed. Stash the
+// set to count and defer both the count and the paint until it's opened.
+let _extCountSrc=[];
+function computeExtCounts(paths){
   const counts={};
-  paths.forEach(p=>{const e=getExt(p);if(e)counts[e]=(counts[e]||0)+1;});
+  paths.forEach(p=>{const e=pmeta(p).ext;if(e)counts[e]=(counts[e]||0)+1;});
   _extCounts=counts;
   const unknown=Object.keys(counts).filter(e=>!EXT_DESC[e]&&!_fileDescs[e]);
   if(unknown.length){
@@ -1284,7 +1527,12 @@ function rebuildExts(paths){
         }
       }).catch(()=>{});
   }
-  paintExtChips();
+}
+function rebuildExts(paths){
+  _extCountSrc=paths;
+  const dd=document.getElementById('extdrop');
+  if(dd&&dd.classList.contains('open')){computeExtCounts(paths);paintExtChips();}
+  else updateExtBtn();
 }
 function paintExtChips(){
   const inp=document.getElementById('extsearch');
@@ -1335,15 +1583,35 @@ function paintExtChips(){
 }
 function clearExtFilters(){exts.clear();negExts.clear();paintExtChips();requestAnimationFrame(go);}
 function onExtSearch(){paintExtChips();}
-function rebuildShares(paths){
+let _shareCountSrc=[];
+function computeShareCounts(paths){
   const counts={};
-  paths.forEach(p=>{const m=p.match(/^\\/\\/[^/]+\\/([^/]+)/);if(m)counts[m[1]]=(counts[m[1]]||0)+1;});
-  _shareCounts=counts;paintShareChips();
+  paths.forEach(p=>{const sn=pmeta(p).share;if(sn)counts[sn]=(counts[sn]||0)+1;});
+  const hostsInScope=activeFilter&&activeFilter.type==='host'
+    ?[activeFilter.hostname]
+    :activeFilter&&activeFilter.type==='group'
+      ?(groups.find(g=>g.id===activeFilter.groupId)||{hostnames:[]}).hostnames
+      :Object.keys(allReadableByHost);
+  hostsInScope.forEach(h=>{
+    (allReadableByHost[h]||[]).forEach(sp=>{
+      const parts=sp.split('/').filter(Boolean);
+      if(parts[1]&&!(parts[1] in counts))counts[parts[1]]=0;
+    });
+  });
+  _shareCounts=counts;
+}
+function rebuildShares(paths){
+  _shareCountSrc=paths;
+  const sd=document.getElementById('sharedrop');
+  if(sd&&sd.classList.contains('open')){computeShareCounts(paths);paintShareChips();}
+  else updateShareBtn();
 }
 function toggleShareDrop(e){
   if(e)e.stopPropagation();
   const d=document.getElementById('sharedrop');
-  d.classList.toggle('open',!d.classList.contains('open'));
+  const willOpen=!d.classList.contains('open');
+  d.classList.toggle('open',willOpen);
+  if(willOpen){computeShareCounts(_shareCountSrc);paintShareChips();}
 }
 function updateShareBtn(){
   const inc=incShares.size,exc=negShares.size;
@@ -1396,7 +1664,7 @@ function toggleUN(){
 function render(paths){
   if(uniqueNames){
     const seen=new Set();
-    displayed=paths.filter(p=>{const n=(p.split('/').pop()||p).toLowerCase();return seen.has(n)?false:(seen.add(n),true);});
+    displayed=paths.filter(p=>{const n=pmeta(p).nameLower;return seen.has(n)?false:(seen.add(n),true);});
   } else {
     displayed=paths;
   }
@@ -1452,7 +1720,7 @@ function hitcount(text){
     s.textContent=total+' match'+(total===1?'':'es');rb.appendChild(s);
   }
 }
-function proxy(){return document.getElementById('useProxy').checked?1:0;}
+function proxy(){return 0;}
 function sel(el,path){
   // abort any in-flight request
   if(activeCtrl){clearTimeout(activeTid);activeCtrl.abort();activeCtrl=null;activeTid=null;}
@@ -1475,16 +1743,16 @@ function sel(el,path){
     }).catch(e=>{
       clearTimeout(activeTid);activeCtrl=null;activeTid=null;
       const c=document.getElementById('content');
-      c.textContent=e.name==='AbortError'?'Timed Out Reading File — Use Download to Get It':'Error Reading File';
+      c.textContent=e.name==='AbortError'?'Timed out reading file — use download to get the full file':'Error reading file';
       document.getElementById('bottom').style.display='block';
     });
 }
 function dl(){
   if(!cur)return;
-  document.getElementById('status').textContent='[*] Downloading: '+cur;
+  document.getElementById('status').textContent='Downloading '+cur;
   fetch('/download?path='+encodeURIComponent(cur)+'&proxy='+proxy())
     .then(r=>r.json()).then(d=>{
-      document.getElementById('status').innerHTML=d.ok?'<span class=ok>[+] Saved: '+d.msg+'</span>':'<span class=err>[-] Failed: '+d.msg+'</span>';
+      document.getElementById('status').innerHTML=d.ok?'<span class=ok>Saved: '+d.msg+'</span>':'<span class=err>Failed: '+d.msg+'</span>';
     });
 }
 function startDlPoll(){
@@ -1493,19 +1761,19 @@ function startDlPoll(){
     fetch('/dlstatus').then(r=>r.json()).then(d=>{
       const s=document.getElementById('status');
       if(d.running){
-        s.textContent='[*] Downloading... '+d.done+'/'+d.total;
+        s.textContent='Downloading '+d.done+'/'+d.total+'...';
       } else if(d.total>0){
         clearInterval(dlPollTimer);dlPollTimer=null;
         const msg=d.failed>0
-          ?'[+] Download Complete: '+d.done+' saved, '+d.failed+' failed'
-          :'[+] Download Complete: '+d.done+' file(s) saved';
+          ?'Download complete — '+d.done+' saved, '+d.failed+' failed'
+          :'Download complete — '+d.done+' file(s) saved';
         s.innerHTML='<span class=ok>'+msg+'</span>';
       }
     });
   },2000);
 }
 function downloadAll(){
-  if(!displayed.length){document.getElementById('status').textContent='Nothing to Download';return;}
+  if(!displayed.length){document.getElementById('status').textContent='Nothing to download';return;}
   document.getElementById('dlmodal-sub').textContent='Which folder would you like to save '+displayed.length+' file'+(displayed.length===1?'':'s')+' to?';
   document.getElementById('dlmodal').style.display='flex';
 }
@@ -1513,7 +1781,7 @@ function closeDlModal(){document.getElementById('dlmodal').style.display='none';
 function startDlAll(extFolders){
   closeDlModal();
   const n=displayed.length;
-  document.getElementById('status').textContent='[*] Queuing '+n+' file(s) for download...';
+  document.getElementById('status').textContent='Queuing '+n+' file(s) for download...';
   fetch('/downloadall',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -1521,7 +1789,7 @@ function startDlAll(extFolders){
   }).then(r=>r.json()).then(d=>{
     const s=document.getElementById('status');
     if(d.ok){startDlPoll();}
-    else s.innerHTML='<span class=err>[-] '+esc(d.msg)+'</span>';
+    else s.innerHTML='<span class=err>'+esc(d.msg)+'</span>';
   });
 }
 function clearRight(){
@@ -1546,6 +1814,20 @@ def start_gui(creds, pathsfile=''):
     dl_status = [{'running': False, 'done': 0, 'failed': 0, 'total': 0}]
     SCAN_WORKERS = 15
     scan_queue = queue.Queue()
+    active_procs = {}       # job_id -> currently running Popen for that job
+    active_procs_lock = threading.Lock()
+
+    def is_cancelled(job_id):
+        with jobs_lock:
+            return jobs.get(job_id, {}).get('cancelled', False)
+
+    def register_proc(job_id, proc):
+        with active_procs_lock:
+            active_procs[job_id] = proc
+
+    def unregister_proc(job_id):
+        with active_procs_lock:
+            active_procs.pop(job_id, None)
 
     ext_descs = {}
     ext_descs_lock = threading.Lock()
@@ -1581,18 +1863,27 @@ def start_gui(creds, pathsfile=''):
             live_paths = [l.strip() for l in f if l.strip()]
     else:
         # auto-load any smblist_<host> files in cwd
-        print(f'[*] scanning for smblist_* files in: {os.path.abspath(".")}', file=sys.stderr)
+        print(f'Scanning for smblist_* files in: {os.path.abspath(".")}', file=sys.stderr)
         seen = set()
         for fname in sorted(os.listdir('.')):
             if fname.startswith('smblist_') and fname not in _SMBLIST_NON_PATH and os.path.isfile(fname):
                 try:
+                    before = len(live_paths)
                     with open(fname) as f:
                         for line in f:
                             p = line.strip()
                             if p and p not in seen:
                                 seen.add(p)
                                 live_paths.append(p)
-                    print(f'[*] auto-loaded: {fname} ({len(live_paths)} paths total)', file=sys.stderr)
+                    added = len(live_paths) - before
+                    if added == 0:
+                        # empty/no-op result file — clean it up and don't clutter the log
+                        try:
+                            os.remove(fname)
+                        except Exception:
+                            pass
+                        continue
+                    print(f'Loaded: {fname} ({len(live_paths)} paths total)', file=sys.stderr)
                 except Exception:
                     pass
 
@@ -1600,12 +1891,19 @@ def start_gui(creds, pathsfile=''):
         def setstatus(s):
             with jobs_lock:
                 jobs[job_id]['status'] = s
+        if is_cancelled(job_id):
+            return
         try:
             setstatus('running nxc')
             nxc_cmd = ['netexec', 'smb', host, '-u', user, '-p', passwd, '-d', domain, '--shares']
             if dns:
                 nxc_cmd += ['--dns-server', dns]
-            result = run_cmd(nxc_cmd, use_proxy, timeout=60)
+            result = run_cmd(nxc_cmd, use_proxy, timeout=60,
+                              on_start=lambda proc: register_proc(job_id, proc),
+                              cancel_check=lambda: is_cancelled(job_id))
+            unregister_proc(job_id)
+            if result.stderr.strip() == 'cancelled':
+                return
             if result.stderr.strip() == 'timed out':
                 with jobs_lock:
                     jobs[job_id]['status'] = 'error'
@@ -1614,6 +1912,7 @@ def start_gui(creds, pathsfile=''):
             shares, restricted_shares = parse_nxc_full(result.stdout, is_file=False)
             with jobs_lock:
                 jobs[job_id]['restricted'] = restricted_shares
+                jobs[job_id]['readable'] = shares
             if not shares:
                 note = 'no readable shares' + (f' ({len(restricted_shares)} restricted)' if restricted_shares else '')
                 combined = (result.stderr + result.stdout).lower()
@@ -1632,32 +1931,57 @@ def start_gui(creds, pathsfile=''):
 
             safe = re.sub(r'[/\\:]', '_', host)
             outfile = f'smblist_{safe}'
-            open(outfile, 'w').close()
 
             setstatus(f'enumerating {len(shares)} share(s)')
-            with open(outfile, 'a') as fh:
+            fh = None
+            share_errors = []
+            try:
                 for share in shares:
-                    new_paths = smbclient_ls(share, creds, use_proxy, dns_server=dns)
+                    if is_cancelled(job_id):
+                        break
+                    new_paths, err = smbclient_ls(share, creds, use_proxy, dns_server=dns,
+                                                   on_start=lambda proc: register_proc(job_id, proc),
+                                                   cancel_check=lambda: is_cancelled(job_id))
+                    unregister_proc(job_id)
                     if new_paths:
                         with paths_lock:
                             live_paths.extend(new_paths)
                         with jobs_lock:
                             jobs[job_id]['found'] += len(new_paths)
                             jobs[job_id]['current'] = new_paths[-1]
+                        if fh is None:
+                            fh = open(outfile, 'w')
                         fh.write('\n'.join(new_paths) + '\n')
                         fh.flush()
+                    elif err:
+                        share_errors.append(f"{share.rsplit('/', 1)[-1]}: {err}")
+            finally:
+                if fh:
+                    fh.close()
 
-            setstatus('done')
+            if not is_cancelled(job_id):
+                setstatus('done')
+                with jobs_lock:
+                    if jobs[job_id]['found'] == 0 and not jobs[job_id].get('note'):
+                        jobs[job_id]['note'] = '; '.join(share_errors)[:150] if share_errors else 'no files found'
         except Exception as e:
-            with jobs_lock:
-                jobs[job_id]['status'] = 'error'
-                jobs[job_id]['note'] = str(e)
+            if not is_cancelled(job_id):
+                with jobs_lock:
+                    jobs[job_id]['status'] = 'error'
+                    jobs[job_id]['note'] = str(e)
 
     def bg_scan_share(job_id, share_path, use_proxy, dns=''):
         try:
             with jobs_lock:
                 jobs[job_id]['status'] = 'scanning'
-            new_paths = smbclient_ls(share_path, creds, use_proxy, dns_server=dns, timeout=600)
+            if is_cancelled(job_id):
+                return
+            new_paths, err = smbclient_ls(share_path, creds, use_proxy, dns_server=dns, timeout=600,
+                                           on_start=lambda proc: register_proc(job_id, proc),
+                                           cancel_check=lambda: is_cancelled(job_id))
+            unregister_proc(job_id)
+            if is_cancelled(job_id):
+                return
             if new_paths:
                 with paths_lock:
                     live_paths.extend(new_paths)
@@ -1672,11 +1996,12 @@ def start_gui(creds, pathsfile=''):
             with jobs_lock:
                 jobs[job_id]['status'] = 'done'
                 if not new_paths:
-                    jobs[job_id]['note'] = 'no files found'
+                    jobs[job_id]['note'] = err or 'no files found'
         except Exception as e:
-            with jobs_lock:
-                jobs[job_id]['status'] = 'error'
-                jobs[job_id]['note'] = str(e)
+            if not is_cancelled(job_id):
+                with jobs_lock:
+                    jobs[job_id]['status'] = 'error'
+                    jobs[job_id]['note'] = str(e)
 
     def scan_worker():
         while True:
@@ -1746,7 +2071,7 @@ def start_gui(creds, pathsfile=''):
                 with jobs_lock:
                     job_counter[0] += 1
                     job_id = str(job_counter[0])
-                    jobs[job_id] = {'host': host, 'status': 'queued', 'found': 0, 'note': '', 'current': '', 'restricted': []}
+                    jobs[job_id] = {'host': host, 'status': 'queued', 'found': 0, 'note': '', 'current': '', 'restricted': [], 'readable': []}
                 scan_queue.put((job_id, host, use_proxy, dns))
                 self.send_json({'ok': True, 'id': job_id})
 
@@ -1812,6 +2137,37 @@ def start_gui(creds, pathsfile=''):
 
             elif p.path == '/dlstatus':
                 self.send_json(dl_status[0])
+
+            elif p.path == '/stopall':
+                cancelled = 0
+                drained = []
+                while True:
+                    try:
+                        drained.append(scan_queue.get_nowait())
+                    except queue.Empty:
+                        break
+                with jobs_lock:
+                    for job_id, host, use_proxy, dns in drained:
+                        j = jobs.get(job_id)
+                        if j and j['status'] not in ('done', 'error'):
+                            j['status'] = 'error'
+                            j['note'] = 'cancelled'
+                            j['cancelled'] = True
+                            cancelled += 1
+                    for job_id, j in jobs.items():
+                        if j['status'] not in ('done', 'error'):
+                            j['cancelled'] = True
+                            j['status'] = 'error'
+                            j['note'] = 'cancelled'
+                            cancelled += 1
+                with active_procs_lock:
+                    procs = list(active_procs.values())
+                for proc in procs:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                self.send_json({'ok': True, 'cancelled': cancelled})
 
             elif p.path == '/scanshare':
                 share_path = qs.get('share', [''])[0].strip()
@@ -1948,10 +2304,34 @@ def start_gui(creds, pathsfile=''):
                 self.end_headers()
 
     port = 18888
-    print(f'[*] smblist gui at http://127.0.0.1:{port}')
-    print('[*] ctrl+c to stop')
-    threading.Timer(1, lambda: webbrowser.open(f'http://127.0.0.1:{port}')).start()
-    ThreadingHTTPServer(('127.0.0.1', port), Handler).serve_forever()
+
+    def _wsl_ip():
+        try:
+            with open('/proc/version') as f:
+                if 'microsoft' not in f.read().lower():
+                    return None
+            r = subprocess.run(['hostname', '-I'], capture_output=True, text=True, timeout=3)
+            ip = r.stdout.strip().split()[0] if r.stdout.strip() else None
+            return ip
+        except Exception:
+            return None
+
+    wsl_ip = _wsl_ip()
+    url = f'http://{wsl_ip}:{port}' if wsl_ip else f'http://127.0.0.1:{port}'
+    print(f'smblist running at {url}')
+    print('Press Ctrl+C to stop')
+
+    def _open_browser():
+        if wsl_ip:
+            try:
+                subprocess.Popen(['explorer.exe', url], stderr=subprocess.DEVNULL)
+                return
+            except Exception:
+                pass
+        webbrowser.open(url)
+
+    threading.Timer(1, _open_browser).start()
+    ThreadingHTTPServer(('0.0.0.0', port), Handler).serve_forever()
 
 
 # ---------------------------------------------------------------------------
@@ -1978,6 +2358,14 @@ def main():
     args = sys.argv[2:]
     domain, user, passwd = parse_creds(creds)
 
+    if '-d' in args:
+        idx = args.index('-d')
+        if idx + 1 >= len(args):
+            usage()
+        domain = args[idx + 1]
+        args = [a for i, a in enumerate(args) if i != idx and i != idx + 1]
+        creds = f'{domain}/{user}%{passwd}'
+
     outfile = None
     if '-o' in args:
         idx = args.index('-o')
@@ -1998,9 +2386,9 @@ def main():
                 target_dir = gui_args[idx + 1]
                 try:
                     os.chdir(target_dir)
-                    print(f'[*] working directory: {os.path.abspath(".")}', file=sys.stderr)
+                    print(f'Working directory: {os.path.abspath(".")}', file=sys.stderr)
                 except Exception as e:
-                    print(f'[-] cannot cd to {target_dir!r}: {e}', file=sys.stderr)
+                    print(f'Cannot change to directory {target_dir!r}: {e}', file=sys.stderr)
                     sys.exit(1)
                 gui_args = [a for i, a in enumerate(gui_args) if i != idx and i != idx + 1]
         if gui_args and not gui_args[0].startswith('-'):
