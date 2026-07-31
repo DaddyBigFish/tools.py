@@ -1,0 +1,17 @@
+#!/bin/bash
+T=""; P=""
+while [[ $# -gt 0 ]]; do
+case $1 in
+-u) T="$2"; shift 2;;
+--proxy) P="$2"; shift 2;;
+*) echo "Usage: webdiscover -u <URL> [--proxy <proxy>]"; exit 1;;
+esac
+done
+[ -z "$T" ] && { echo "Usage: webdiscover -u <URL> [--proxy <proxy>]"; exit 1; }
+[ -n "$P" ] && [[ ! "$P" =~ :// ]] && P="socks5h://$P"
+FP=""; HP=""; KP=""
+[ -n "$P" ] && { FP="--proxy $P"; HP="-http-proxy $P"; KP="-proxy $P"; }
+echo -e '\n===================== DIRECTORIES'
+feroxbuster -u "$T" -C 302,301,400,403,404,500 --insecure --dont-filter --depth 2 --scan-dir-listings --silent $FP | httpx -silent -status-code -tech-detect -content-type -follow-redirects $HP | sort -u
+echo -e '\n\n===================== PARAMETERS'
+katana -u "$T" -jc -kf all -silent $KP | httpx -silent -status-code -tech-detect -content-type -follow-redirects $HP | sort -u
