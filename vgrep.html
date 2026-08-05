@@ -79,10 +79,10 @@ rp.textContent=dirH.name;
 cnt.textContent=allFiles.length+' files';
 R();
 }
-function Y(){const a=A(inc.value),b=A(fi.value),c=A(fx.value);const only=a.length===0&&(b.length>0||c.length>0);const e=ea.checked||only;ea.checked=e;return{inc:a,exc:A(exc.value),fi:b,fx:c,rx:rx.checked,cs:cs.checked,expA:e,mnS:B(mn.value),mxS:B(mx.value),maxF:e?30:120,maxM:15};}
+function Y(){const a=A(inc.value),b=A(fi.value),c=A(fx.value);const only=a.length===0&&(b.length>0||c.length>0);const e=ea.checked||only;ea.checked=e;return{inc:a,exc:A(exc.value),fi:b,fx:c,rx:rx.checked,cs:cs.checked,expA:e,mnS:B(mn.value),mxS:B(mx.value),maxF:120,maxM:15};}
 function R(){if(!workers.length)return;gen++;const g=gen;pend=new Array(NW).fill(null);const p=Y();for(let i=0;i<NW;i++)workers[i].postMessage({type:'search',gen:g,idx:i,...p});}
 function O(ev){const m=ev.data;if(m.type!=='result'||m.gen!==gen)return;pend[m.idx]=m;if(pend.every(r=>r))N();}
-function N(){let results=[],scanned=0,trunc=false;for(const r of pend){results=results.concat(r.results);scanned+=r.scanned;if(r.trunc)trunc=true;}const maxF=ea.checked?30:120;if(results.length>maxF){trunc=true;results=results.slice(0,maxF);}D({results,scanned,total:allFiles.length,matched:results.length,trunc});}
+function N(){let results=[],scanned=0,trunc=false;for(const r of pend){results=results.concat(r.results);scanned+=r.scanned;if(r.trunc)trunc=true;}const maxF=120;if(results.length>maxF){trunc=true;results=results.slice(0,maxF);}D({results,scanned,total:allFiles.length,matched:results.length,trunc});}
 function E(p){const cur=A(fx.value);if(!cur.includes(p)){cur.push(p);fx.value=cur.join(', ');}R();}
 function D(d){
 const frag=document.createDocumentFragment();
