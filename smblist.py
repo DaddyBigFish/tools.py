@@ -20,12 +20,132 @@ creds: same format as smbclient -U  →  domain/user%pass
 -d <DOMAIN> can be combined with any mode above, e.g.:
   smblist.py 'jsmith%Password123' -d CORP -gui
   smblist.py 'jsmith%Password123' -d CORP -host hosts.txt
+
+Alternatively, use netexec-style flags instead of a packed creds string:
+  -u <user> [-p <pass>] [-d <domain>]
+  smblist.py -u jsmith -p Password123 -d CORP -gui
+  smblist.py -u jsmith -p Password123 -d CORP -host hosts.txt
 """
 
-import sys, os, re, subprocess, threading, webbrowser, json, time, queue, urllib.request
+import sys, os, re, subprocess, threading, webbrowser, json, time, queue, urllib.request, tempfile, zipfile
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.parse
+
+IMAGE_MIME = {
+    'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'gif': 'image/gif',
+    'bmp': 'image/bmp', 'webp': 'image/webp', 'ico': 'image/x-icon',
+    'svg': 'image/svg+xml', 'avif': 'image/avif',
+}
+IMAGE_PREVIEW_CAP = 25 * 1024 * 1024
+
+# ---------------------------------------------------------------------------
+# office text extraction — docx/xlsx/pptx (and macro/template variants) are
+# secretly a zip of XML files, so stdlib zipfile+ElementTree can pull the raw
+# text out with no extra packages needed. Legacy binary doc/xls/ppt formats
+# aren't zip-based at all and can't be handled this way.
+# ---------------------------------------------------------------------------
+DOCX_EXTS = {'docx', 'docm', 'dotx', 'dotm'}
+XLSX_EXTS = {'xlsx', 'xlsm', 'xltx', 'xltm'}
+PPTX_EXTS = {'pptx', 'pptm', 'potx', 'potm'}
+OFFICE_TEXT_EXTS = DOCX_EXTS | XLSX_EXTS | PPTX_EXTS
+OFFICE_PREVIEW_MAX_BYTES = 25 * 1024 * 1024
+
+_W_NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+_A_NS = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
+_S_NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+
+
+def extract_docx_text(path):
+    with zipfile.ZipFile(path) as z:
+        with z.open('word/document.xml') as f:
+            root = ET.parse(f).getroot()
+    paragraphs = []
+    for para in root.iter(_W_NS + 'p'):
+        paragraphs.append(''.join(t.text or '' for t in para.iter(_W_NS + 't')))
+    return '\n'.join(paragraphs)
+
+
+def extract_pptx_text(path):
+    with zipfile.ZipFile(path) as z:
+        slides = sorted(
+            (n for n in z.namelist() if re.match(r'ppt/slides/slide\d+\.xml$', n)),
+            key=lambda n: int(re.search(r'(\d+)', n).group(1))
+        )
+        out = []
+        for i, name in enumerate(slides, 1):
+            with z.open(name) as f:
+                root = ET.parse(f).getroot()
+            texts = [t.text for t in root.iter(_A_NS + 't') if t.text]
+            out.append(f'--- Slide {i} ---\n' + '\n'.join(texts))
+    return '\n\n'.join(out)
+
+
+def _col_idx(cell_ref):
+    m = re.match(r'([A-Z]+)', cell_ref)
+    if not m:
+        return 0
+    idx = 0
+    for ch in m.group(1):
+        idx = idx * 26 + (ord(ch) - 64)
+    return idx
+
+
+def extract_xlsx_text(path):
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        shared = []
+        if 'xl/sharedStrings.xml' in names:
+            with z.open('xl/sharedStrings.xml') as f:
+                for si in ET.parse(f).getroot().iter(_S_NS + 'si'):
+                    shared.append(''.join(t.text or '' for t in si.iter(_S_NS + 't')))
+        sheets = sorted(
+            (n for n in names if re.match(r'xl/worksheets/sheet\d+\.xml$', n)),
+            key=lambda n: int(re.search(r'(\d+)', n).group(1))
+        )
+        out = []
+        for i, sheet in enumerate(sheets, 1):
+            with z.open(sheet) as f:
+                root = ET.parse(f).getroot()
+            rows = []
+            for row in root.iter(_S_NS + 'row'):
+                cells, maxcol = {}, 0
+                for c in row.findall(_S_NS + 'c'):
+                    idx = _col_idx(c.get('r', '')) or (maxcol + 1)
+                    maxcol = max(maxcol, idx)
+                    t = c.get('t')
+                    if t == 's':
+                        v = c.find(_S_NS + 'v')
+                        val = shared[int(v.text)] if v is not None and v.text and v.text.isdigit() and int(v.text) < len(shared) else ''
+                    elif t == 'inlineStr':
+                        is_el = c.find(_S_NS + 'is')
+                        val = ''.join(tt.text or '' for tt in is_el.iter(_S_NS + 't')) if is_el is not None else ''
+                    else:
+                        v = c.find(_S_NS + 'v')
+                        val = v.text or '' if v is not None else ''
+                    cells[idx] = val
+                rows.append('\t'.join(cells.get(j, '') for j in range(1, maxcol + 1)))
+            out.append(f'--- Sheet {i} ---\n' + '\n'.join(rows))
+    return '\n\n'.join(out)
+
+
+def preview_dir():
+    """Scratch dir for transient preview downloads — same tree as ./smblist/downloads.
+    Files here are always deleted right after being read, before the response is sent."""
+    d = os.path.join('smblist', 'preview')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def extract_office_text(path, ext):
+    if ext in DOCX_EXTS:
+        return extract_docx_text(path)
+    if ext in XLSX_EXTS:
+        return extract_xlsx_text(path)
+    if ext in PPTX_EXTS:
+        return extract_pptx_text(path)
+    raise ValueError('unsupported office format')
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -52,8 +172,8 @@ def run_cmd(cmd, use_proxy=False, timeout=None, on_start=None, cancel_check=None
     if use_proxy:
         cmd = ['proxychains', '-q'] + cmd
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                 env={**os.environ, 'PROXYCHAINS_QUIET_MODE': '1'})
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, env={**os.environ, 'PROXYCHAINS_QUIET_MODE': '1'})
     except Exception as e:
         return subprocess.CompletedProcess(cmd, 1, stdout='', stderr=str(e))
     if on_start:
@@ -148,7 +268,7 @@ def resolve_host(host, dns_server):
     try:
         result = subprocess.run(
             ['dig', '+short', f'@{dns_server}', host],
-            capture_output=True, text=True, timeout=5
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0:
             for line in reversed(result.stdout.strip().splitlines()):
@@ -323,6 +443,7 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
 .jnote{color:var(--red);font-size:10px}
 .jcur{color:var(--tx-d);font-size:10px;font-family:var(--mono);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .spinner{display:inline-block;width:9px;height:9px;border:1.5px solid var(--bd);border-top-color:var(--ac);border-radius:50%;animation:spin .7s linear infinite}
+.spinner-lg{width:34px;height:34px;border:3px solid var(--bd);border-top-color:var(--ac)}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 #main{display:flex;flex:1;overflow:hidden;min-height:0}
@@ -475,6 +596,17 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
 .modal-foot{display:flex;gap:8px;justify-content:flex-end}
 </style></head>
 <body>
+<div id=loadingmodal class=modal-overlay style="z-index:10001">
+  <div class=modal style="align-items:center;text-align:center">
+    <span class="spinner spinner-lg"></span>
+    <div class=modal-title>Loading smblist</div>
+    <div class=modal-sub>Fetching discovered paths and hosts&hellip;</div>
+    <div style="width:220px;height:6px;background:var(--bg4);border-radius:3px;overflow:hidden">
+      <div id=loadprogress-fill style="height:100%;width:0%;background:var(--ac);transition:width .25s"></div>
+    </div>
+    <div id=loadprogress-pct style="font-size:11px;color:var(--tx-d)">0%</div>
+  </div>
+</div>
 <div id=dlmodal style="display:none" class=modal-overlay onclick="if(event.target===this)closeDlModal()">
   <div class=modal>
     <div class=modal-title>Download All Files</div>
@@ -592,7 +724,7 @@ body{font-family:var(--ui);background:var(--bg1);color:var(--tx);height:100vh;di
       <input type=text id=filtercontent placeholder="keyword, keyword  (comma = OR)" oninput=scheduleHL()>
     </div>
     <div id=header>Select a File to Preview</div>
-    <div id=contentarea><pre id=content style="color:var(--tx-d)">Select a Path from the List to View its Contents</pre></div>
+    <div id=contentarea><pre id=content style="color:var(--tx-d)">Select a Path from the List to View its Contents</pre><img id=imgpreview style="display:none;max-width:100%;max-height:100%;object-fit:contain"><iframe id=pdfpreview style="display:none;width:100%;height:100%;border:none;background:#fff"></iframe></div>
     <div id=bottom><button class=dl-btn onclick=dl()>Download File</button></div>
   </div>
 </div>
@@ -747,6 +879,8 @@ const EXT_DESC={
   oct:'October Data File',nov:'November Data File',dec:'December Data File',
 };
 const ROW_H=20;
+const IMG_EXTS=new Set(['jpg','jpeg','png','gif','bmp','webp','ico','svg','avif']);
+const PDF_EXTS=new Set(['pdf']);
 let all=[],cur=null,ft=null,hlt=null,lastContent='',filtered=[],displayed=[],exts=new Set(),negExts=new Set(),fnOnly=true,uniqueNames=false;
 let allRestrictedByHost={};
 let allReadableByHost={};
@@ -819,24 +953,42 @@ function ungroupedHosts(hosts){
 }
 
 // ── init ──
+function hideLoadingModal(){
+  const m=document.getElementById('loadingmodal');if(m)m.style.display='none';
+}
+// real progress, not a fake animation — ticks once per initial request as it
+// actually completes (4 requests fire on page load: paths, groups, extdescs, jobs)
+let _loadDone=0;
+const _loadTotal=4;
+function loadTick(){
+  _loadDone++;
+  const pct=Math.min(100,Math.round(_loadDone/_loadTotal*100));
+  const fill=document.getElementById('loadprogress-fill');
+  const lbl=document.getElementById('loadprogress-pct');
+  if(fill)fill.style.width=pct+'%';
+  if(lbl)lbl.textContent=pct+'%';
+  if(_loadDone>=_loadTotal)hideLoadingModal();
+}
 function loadPaths(){
   document.getElementById('status').innerHTML='<span class=spinner></span> Loading...';
   document.getElementById('treebody').innerHTML='<div style="padding:16px 14px;font-size:11px;color:var(--tx-d);display:flex;align-items:center;gap:8px"><span class=spinner></span>Loading Hosts...</div>';
-  Promise.all([
-    fetch('/paths').then(r=>r.json()),
-    fetch('/groups').then(r=>r.json())
-  ]).then(([paths,grps])=>{
+  const pPaths=fetch('/paths').then(r=>r.json()).finally(loadTick);
+  const pGroups=fetch('/groups').then(r=>r.json()).finally(loadTick);
+  Promise.all([pPaths,pGroups]).then(([paths,grps])=>{
     groups=grps;allPaths=paths;all=paths;exts.clear();negExts.clear();
     try{go();}catch(e){console.error('go:',e);}renderTree();
     warmCaches();
+  }).catch(()=>{
+    document.getElementById('status').innerHTML='<span class=err>Failed to load paths</span>';
+    hideLoadingModal();
   });
 }
 loadPaths();
-fetch('/extdescs').then(r=>r.json()).then(d=>{_fileDescs=d;}).catch(()=>{});
+fetch('/extdescs').then(r=>r.json()).then(d=>{_fileDescs=d;}).catch(()=>{}).finally(loadTick);
 fetch('/jobs').then(r=>r.json()).then(d=>{
   allJobs=d;allRestrictedByHost=extractRestricted(d);allReadableByHost=extractReadable(d);renderJobs(d);renderTree();
   if(Object.values(d).some(j=>j.status!=='done'&&j.status!=='error'))startPolling();
-});
+}).catch(()=>{}).finally(loadTick);
 
 // ── host scanning ──
 function dnsVal(){return document.getElementById('dnsinput').value.trim();}
@@ -930,7 +1082,6 @@ function poll(){
     fetch('/jobs').then(r=>r.json())
   ]).then(([newPaths,jobdata])=>{
     allJobs=jobdata;allRestrictedByHost=extractRestricted(jobdata);allReadableByHost=extractReadable(jobdata);allPaths=newPaths;
-    warmCaches();
     renderJobs(jobdata);
     const treeSig=newPaths.length+'|'+(newPaths[newPaths.length-1]||'');
     if(treeSig!==_lastTreeSig){_lastTreeSig=treeSig;renderTree();}
@@ -940,7 +1091,13 @@ function poll(){
       if(activeFilter){applyFilter();}else{all=newPaths;go();}
     }
     const anyActive=Object.values(jobdata).some(j=>j.status!=='done'&&j.status!=='error');
-    if(!anyActive&&Object.keys(jobdata).length>0){stopPolling();all=allPaths;go();renderTree();}
+    // don't eagerly rebuild caches on every 2s tick while a scan is still
+    // running — go()/applyFilter() above already incrementally maintain
+    // whichever cache the current view needs. Only force a full warm-up once
+    // the scan session is actually done, so caches other than the one you
+    // were watching (e.g. "all" while you had a single host selected) are
+    // ready before your next click.
+    if(!anyActive&&Object.keys(jobdata).length>0){stopPolling();all=allPaths;go();renderTree();warmCaches();}
   });
 }
 
@@ -987,8 +1144,11 @@ function renderJobs(jobdata){
     let html=`<span class=jlbl>scanning (${scanning.length}/15):</span>`;
     html+=scanning.map(j=>{
       const count=j.found>0?`<span class=jcount>${j.found}</span>`:'';
+      const shareLbl=j.share_total>0?`share ${j.share_idx}/${j.share_total}: ${j.current_share||''}`:'';
+      const shareProg=shareLbl?`<span class=jcur title="${esc(shareLbl)}">${esc(shareLbl)}</span>`:'';
       const cur=j.current?`<span class=jcur title="${esc(j.current)}">${esc(j.current.split('/').pop()||j.current)}</span>`:'';
-      return `<span class=job><span class=spinner></span><span class=jhost>${esc(j.host)}</span>${count}${cur}</span>`;
+      const err=j.last_error?`<span class=jnote title="${esc(j.last_error)}">⚠ ${esc(j.last_error)}</span>`:'';
+      return `<span class=job><span class=spinner></span><span class=jhost>${esc(j.host)}</span>${count}${shareProg}${cur}${err}</span>`;
     }).join('');
     row.innerHTML=html;panel.appendChild(row);
   }
@@ -1291,53 +1451,90 @@ function setFilter(f){
   syncShareChips();updateShareBtn();updateTreeHighlights();requestAnimationFrame(applyFilter);
 }
 
+// allPaths only ever grows by appending (scans extend it, nothing removes from
+// it) — so when a new fetch's array is the previous one plus a tail, we can
+// merge in just the new part instead of re-sorting/reindexing everything from
+// scratch. That matters a lot while a scan is running: newPaths arrives every
+// 2s, so "rebuild everything" becomes "rebuild everything every 2 seconds".
+// isAppendOf(oldArr,oldLen) is a cheap O(1) sanity check (matching last known
+// element) rather than an O(n) full comparison; falls back to a full rebuild
+// if it doesn't hold (e.g. very first load).
+function isAppendOf(oldArr,oldLen){
+  return !!oldArr&&oldLen>0&&allPaths.length>=oldLen&&allPaths[oldLen-1]===oldArr[oldLen-1];
+}
+function sortByNameLower(arr){
+  return arr.slice().sort((a,b)=>{
+    const ka=pmeta(a).nameLower,kb=pmeta(b).nameLower;
+    return ka<kb?-1:ka>kb?1:0;
+  });
+}
+function mergeByNameLower(a,b){
+  if(!b.length)return a;
+  const out=new Array(a.length+b.length);
+  let i=0,j=0,k=0;
+  while(i<a.length&&j<b.length)out[k++]=pmeta(a[i]).nameLower<=pmeta(b[j]).nameLower?a[i++]:b[j++];
+  while(i<a.length)out[k++]=a[i++];
+  while(j<b.length)out[k++]=b[j++];
+  return out;
+}
+
 // per-host path lists, both in raw (scan) order and in name-sorted order — lets
 // switching to a single host be an O(1) lookup instead of an O(allPaths) scan.
-// Rebuilt only when allPaths itself changes (same cache-by-reference trick as
-// getSortedAllPaths).
+let _hostIndexRaw={},_hostIndexSorted={},_hostIndexSrc=null,_hostIndexSrcLen=0;
+function ensureHostIndex(){
+  if(_hostIndexSrc===allPaths)return;
+  if(isAppendOf(_hostIndexSrc,_hostIndexSrcLen)){
+    const touched=new Set();
+    for(let i=_hostIndexSrcLen;i<allPaths.length;i++){
+      const p=allPaths[i],h=pmeta(p).host;
+      if(!h)continue;
+      (_hostIndexRaw[h]||(_hostIndexRaw[h]=[])).push(p);
+      touched.add(h);
+    }
+    touched.forEach(h=>{_hostIndexSorted[h]=sortByNameLower(_hostIndexRaw[h]);});
+  } else {
+    const raw={};
+    allPaths.forEach(p=>{const h=pmeta(p).host;if(h)(raw[h]||(raw[h]=[])).push(p);});
+    const sorted={};
+    getSortedAllPaths().forEach(p=>{const h=pmeta(p).host;if(h)(sorted[h]||(sorted[h]=[])).push(p);});
+    _hostIndexRaw=raw;_hostIndexSorted=sorted;
+  }
+  _hostIndexSrc=allPaths;_hostIndexSrcLen=allPaths.length;
+}
 // the sort cache and host index are otherwise built lazily on whichever click
-// happens to need them first — meaning that click (and only that one) pays the
-// full O(n) cost, then everything after is instant. Warm both proactively as
-// soon as new data lands (in browser idle time, so it never blocks rendering)
-// so the first real click doesn't have to pay for it.
+// happens to need them first. Warm both proactively in browser idle time (so
+// it never blocks rendering) right after new data lands, so a click doesn't
+// have to pay for it — but this is a one-shot nudge, not a per-poll-tick
+// rebuild: it's only called on load and once a scan finishes (see poll()).
 function warmCaches(){
   const run=()=>{getSortedAllPaths();ensureHostIndex();};
   if(window.requestIdleCallback)requestIdleCallback(run,{timeout:1500});
   else setTimeout(run,0);
 }
-let _hostIndexRaw=null,_hostIndexSorted=null,_hostIndexRef=null;
-function ensureHostIndex(){
-  if(_hostIndexRef===allPaths)return;
-  const raw={};
-  allPaths.forEach(p=>{const h=pmeta(p).host;if(h)(raw[h]||(raw[h]=[])).push(p);});
-  const sorted={};
-  getSortedAllPaths().forEach(p=>{const h=pmeta(p).host;if(h)(sorted[h]||(sorted[h]=[])).push(p);});
-  _hostIndexRaw=raw;_hostIndexSorted=sorted;_hostIndexRef=allPaths;
-}
-// applies the current host/group scope to any source array (raw or presorted) —
-// filter() preserves relative order, so scoping a presorted array yields a
-// presorted result without re-sorting. Host scoping specifically uses the
-// prebuilt index above instead of scanning source, since source is always
-// either allPaths or getSortedAllPaths() (the only two call sites below).
-function scopeFilter(source){
-  if(!activeFilter)return source;
+// applies the current host/group scope. sorted=true asks for the name-sorted
+// view; for a host filter that's an O(1) index lookup either way — it never
+// touches getSortedAllPaths(), so viewing one host while other hosts are
+// actively being scanned doesn't pay for sorting the whole (growing) dataset.
+function scopeFilter(sorted){
+  if(!activeFilter)return sorted?getSortedAllPaths():allPaths;
   if(activeFilter.type==='host'){
     ensureHostIndex();
-    const idx=source===allPaths?_hostIndexRaw:_hostIndexSorted;
+    const idx=sorted?_hostIndexSorted:_hostIndexRaw;
     return idx[activeFilter.hostname]||[];
   }
   if(activeFilter.type==='group'){
     const g=groups.find(x=>x.id===activeFilter.groupId);
-    if(!g)return source;
-    return source.filter(p=>g.hostnames.some(h=>p.startsWith('//'+h+'/')));
+    const src=sorted?getSortedAllPaths():allPaths;
+    if(!g)return src;
+    return src.filter(p=>g.hostnames.some(h=>p.startsWith('//'+h+'/')));
   }
-  return source;
+  return sorted?getSortedAllPaths():allPaths;
 }
 function applyFilter(){
   if(activeFilter&&activeFilter.type==='group'&&!groups.find(x=>x.id===activeFilter.groupId)){
     activeFilter=null;
   }
-  all=scopeFilter(allPaths);
+  all=scopeFilter(false);
   go();
 }
 
@@ -1443,23 +1640,22 @@ function getExt(p){return pmeta(p).ext;}
 // allPaths sorted by basename is the single most expensive thing go() used to
 // redo on every keystroke/click (O(n log n) over the whole "all" view — the
 // worst case being the unfiltered "all" scope itself). Sort once per data
-// change and cache it; scopeFilter()/val/share/ext filters below are all
-// order-preserving, so a presorted source stays sorted through every stage
-// with no re-sort needed.
-let _sortedAllPaths=null,_sortedAllPathsRef=null;
+// change and cache it, merging in just the new tail on subsequent (append-only)
+// changes rather than re-sorting the whole growing array from scratch — that's
+// what keeps this affordable while a scan keeps extending allPaths every 2s.
+let _sortedAllPaths=[],_sortedAllPathsSrc=null,_sortedAllPathsSrcLen=0;
 function getSortedAllPaths(){
-  if(_sortedAllPathsRef!==allPaths){
-    _sortedAllPaths=allPaths.slice().sort((a,b)=>{
-      const ka=pmeta(a).nameLower,kb=pmeta(b).nameLower;
-      return ka<kb?-1:ka>kb?1:0;
-    });
-    _sortedAllPathsRef=allPaths;
+  if(_sortedAllPathsSrc!==allPaths){
+    _sortedAllPaths=isAppendOf(_sortedAllPathsSrc,_sortedAllPathsSrcLen)
+      ?mergeByNameLower(_sortedAllPaths,sortByNameLower(allPaths.slice(_sortedAllPathsSrcLen)))
+      :sortByNameLower(allPaths);
+    _sortedAllPathsSrc=allPaths;_sortedAllPathsSrcLen=allPaths.length;
   }
   return _sortedAllPaths;
 }
 function go(){
   const val=document.getElementById('filterpath').value.trim();
-  let tf=fnOnly?scopeFilter(getSortedAllPaths()):all;
+  let tf=fnOnly?scopeFilter(true):all;
   if(val){const terms=val.toLowerCase().split(',').map(t=>t.trim()).filter(Boolean);tf=tf.filter(p=>{const target=fnOnly?pmeta(p).nameLower:p.toLowerCase();return terms.some(t=>target.includes(t));});}
   rebuildShares(tf);
   if(incShares.size>0||negShares.size>0){tf=tf.filter(p=>{const sn=pmeta(p).share;if(!sn)return true;if(negShares.has(sn))return false;return incShares.size===0||incShares.has(sn);});}
@@ -1721,6 +1917,11 @@ function hitcount(text){
   }
 }
 function proxy(){return 0;}
+function imgExt(path){
+  const base=path.split('/').pop()||'';
+  const i=base.lastIndexOf('.');
+  return i<0?'':base.slice(i+1).toLowerCase();
+}
 function sel(el,path){
   // abort any in-flight request
   if(activeCtrl){clearTimeout(activeTid);activeCtrl.abort();activeCtrl=null;activeTid=null;}
@@ -1730,6 +1931,24 @@ function sel(el,path){
   document.getElementById('bottom').style.display='none';
   const oldWarn=document.getElementById('trunc-warn');if(oldWarn)oldWarn.remove();
   lastContent='';
+  const pre=document.getElementById('content'),img=document.getElementById('imgpreview'),pdf=document.getElementById('pdfpreview');
+  // cancel any in-flight image/pdf load by clearing src — nothing is ever cached
+  // to disk on the server between selections, so there's nothing to clean up
+  img.removeAttribute('src');pdf.src='about:blank';
+  if(IMG_EXTS.has(imgExt(path))){
+    pdf.style.display='none';pre.style.display='none';img.style.display='block';
+    img.onerror=()=>{img.style.display='none';pre.style.display='block';pre.textContent='Could not load image (too large, unreadable, or access denied)';document.getElementById('bottom').style.display='block';};
+    img.onload=()=>{document.getElementById('bottom').style.display='block';};
+    img.src='/image?path='+encodeURIComponent(path)+'&proxy='+proxy()+'&_='+Date.now();
+    return;
+  }
+  if(PDF_EXTS.has(imgExt(path))){
+    img.style.display='none';pre.style.display='none';pdf.style.display='block';
+    pdf.src='/image?path='+encodeURIComponent(path)+'&proxy='+proxy()+'&_='+Date.now();
+    document.getElementById('bottom').style.display='block';
+    return;
+  }
+  img.style.display='none';pdf.style.display='none';pre.style.display='block';
   // serve from cache if available
   if(previewCache.has(path)){showPreview(previewCache.get(path));return;}
   document.getElementById('content').textContent='Loading...';
@@ -1795,7 +2014,10 @@ function startDlAll(extFolders){
 function clearRight(){
   cur=null;lastContent='';
   document.getElementById('header').textContent='Select a Path';
-  document.getElementById('content').textContent='Click a Path to View its Contents';
+  const pre=document.getElementById('content'),img=document.getElementById('imgpreview'),pdf=document.getElementById('pdfpreview');
+  img.removeAttribute('src');img.style.display='none';
+  pdf.src='about:blank';pdf.style.display='none';
+  pre.style.display='block';pre.textContent='Click a Path to View its Contents';
   document.getElementById('bottom').style.display='none';
   const old=document.getElementById('rightbar').querySelector('.hc');if(old)old.remove();
 }
@@ -1936,9 +2158,14 @@ def start_gui(creds, pathsfile=''):
             fh = None
             share_errors = []
             try:
-                for share in shares:
+                for idx, share in enumerate(shares, 1):
                     if is_cancelled(job_id):
                         break
+                    share_name = share.rsplit('/', 1)[-1]
+                    with jobs_lock:
+                        jobs[job_id]['share_idx'] = idx
+                        jobs[job_id]['share_total'] = len(shares)
+                        jobs[job_id]['current_share'] = share_name
                     new_paths, err = smbclient_ls(share, creds, use_proxy, dns_server=dns,
                                                    on_start=lambda proc: register_proc(job_id, proc),
                                                    cancel_check=lambda: is_cancelled(job_id))
@@ -1954,7 +2181,9 @@ def start_gui(creds, pathsfile=''):
                         fh.write('\n'.join(new_paths) + '\n')
                         fh.flush()
                     elif err:
-                        share_errors.append(f"{share.rsplit('/', 1)[-1]}: {err}")
+                        share_errors.append(f"{share_name}: {err}")
+                        with jobs_lock:
+                            jobs[job_id]['last_error'] = f"{share_name}: {err}"
             finally:
                 if fh:
                     fh.close()
@@ -2071,7 +2300,9 @@ def start_gui(creds, pathsfile=''):
                 with jobs_lock:
                     job_counter[0] += 1
                     job_id = str(job_counter[0])
-                    jobs[job_id] = {'host': host, 'status': 'queued', 'found': 0, 'note': '', 'current': '', 'restricted': [], 'readable': []}
+                    jobs[job_id] = {'host': host, 'status': 'queued', 'found': 0, 'note': '', 'current': '',
+                                     'restricted': [], 'readable': [], 'share_idx': 0, 'share_total': 0,
+                                     'current_share': '', 'last_error': ''}
                 scan_queue.put((job_id, host, use_proxy, dns))
                 self.send_json({'ok': True, 'id': job_id})
 
@@ -2088,25 +2319,74 @@ def start_gui(creds, pathsfile=''):
                 path = qs.get('path', [''])[0]
                 share, d, fname = parse_smb_path(path)
                 filepath = d.rstrip('/') + '/' + fname if fname else d
-                tmppath = f'/tmp/smblist_preview_{threading.get_ident()}'
+                ext = os.path.splitext(fname)[1].lstrip('.').lower()
+                fd, tmppath = tempfile.mkstemp(dir=preview_dir(), prefix='cat_')
+                os.close(fd)
                 result = run_cmd(
                     ['smbclient', share, '-U', creds, '-c',
                      f'get "{filepath}" {tmppath}'],
                     use_proxy, timeout=30
                 )
+                CAP = 512 * 1024
                 try:
-                    CAP = 512 * 1024
-                    with open(tmppath, 'rb') as f:
-                        raw = f.read(CAP + 1)
-                    os.remove(tmppath)
-                    truncated = len(raw) > CAP
-                    content = raw[:CAP].decode('utf-8', errors='replace')
+                    if ext in OFFICE_TEXT_EXTS:
+                        if os.path.getsize(tmppath) > OFFICE_PREVIEW_MAX_BYTES:
+                            raise ValueError('file too large to preview — use download instead')
+                        content = extract_office_text(tmppath, ext)
+                        os.remove(tmppath)
+                        raw = content.encode('utf-8', errors='replace')
+                        truncated = len(raw) > CAP
+                        content = raw[:CAP].decode('utf-8', errors='ignore')
+                    else:
+                        with open(tmppath, 'rb') as f:
+                            raw = f.read(CAP + 1)
+                        os.remove(tmppath)
+                        truncated = len(raw) > CAP
+                        content = raw[:CAP].decode('utf-8', errors='replace')
                     self.send_json({'ok': True, 'content': content, 'truncated': truncated})
-                except:
+                except Exception as e:
                     try: os.remove(tmppath)
                     except: pass
-                    self.send_json({'ok': False,
-                                    'msg': result.stderr.strip() or 'could not read file'})
+                    if ext in OFFICE_TEXT_EXTS:
+                        msg = f'could not extract text: {e}'
+                    else:
+                        msg = result.stderr.strip() or 'could not read file'
+                    self.send_json({'ok': False, 'msg': msg})
+
+            elif p.path == '/image':
+                path = qs.get('path', [''])[0]
+                share, d, fname = parse_smb_path(path)
+                filepath = d.rstrip('/') + '/' + fname if fname else d
+                ext = os.path.splitext(fname)[1].lstrip('.').lower()
+                mime = IMAGE_MIME.get(ext) or ('application/pdf' if ext == 'pdf' else None)
+                if not mime:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                fd, tmppath = tempfile.mkstemp(dir=preview_dir(), prefix='img_')
+                os.close(fd)
+                try:
+                    result = run_cmd(
+                        ['smbclient', share, '-U', creds, '-c', f'get "{filepath}" {tmppath}'],
+                        use_proxy, timeout=30
+                    )
+                    raw = b''
+                    if os.path.exists(tmppath):
+                        with open(tmppath, 'rb') as f:
+                            raw = f.read(IMAGE_PREVIEW_CAP + 1)
+                finally:
+                    try: os.remove(tmppath)
+                    except Exception: pass
+                if not raw or len(raw) > IMAGE_PREVIEW_CAP:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header('Content-Type', mime)
+                self.send_header('Cache-Control', 'no-cache, no-store')
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
 
             elif p.path == '/download':
                 path = qs.get('path', [''])[0]
@@ -2354,17 +2634,34 @@ def main():
             print(s)
         return
 
-    creds = sys.argv[1]
-    args = sys.argv[2:]
-    domain, user, passwd = parse_creds(creds)
+    args = sys.argv[1:]
 
-    if '-d' in args:
-        idx = args.index('-d')
-        if idx + 1 >= len(args):
-            usage()
-        domain = args[idx + 1]
-        args = [a for i, a in enumerate(args) if i != idx and i != idx + 1]
+    def pop_flag(flag):
+        if flag in args:
+            idx = args.index(flag)
+            if idx + 1 >= len(args):
+                usage()
+            val = args[idx + 1]
+            del args[idx:idx + 2]
+            return val
+        return None
+
+    u = pop_flag('-u')
+    p = pop_flag('-p')
+    d = pop_flag('-d')
+
+    if u is not None:
+        # netexec-style flags instead of a packed smbclient creds string
+        user, passwd, domain = u, p or '', d or ''
         creds = f'{domain}/{user}%{passwd}'
+    else:
+        if not args or args[0].startswith('-'):
+            usage()
+        creds = args.pop(0)
+        domain, user, passwd = parse_creds(creds)
+        if d is not None:
+            domain = d
+            creds = f'{domain}/{user}%{passwd}'
 
     outfile = None
     if '-o' in args:
