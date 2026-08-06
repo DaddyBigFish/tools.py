@@ -1,7 +1,8 @@
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>vgrep</title>
-<style>:root{color-scheme:light dark;--bg:#fff;--fg:#1a1a1a;--muted:#6b7280;--border:#e5e7eb;--panel:#f8f9fa;--accent:#2563eb;--mark:#fde68a;--markfg:#1a1a1a;--mono:ui-monospace,Consolas,Menlo,monospace}@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--fg:#e5e7eb;--muted:#9ca3af;--border:#262b36;--panel:#171a21;--accent:#60a5fa;--mark:#7c5b00;--markfg:#fde68a}}*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--fg);font:14px -apple-system,Segoe UI,Roboto,Arial,sans-serif}#ov{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center}#card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:36px 44px;max-width:420px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.35)}#card h1{font-family:var(--mono);margin:0 0 4px}#card p{color:var(--muted);margin:0 0 18px}.subtitle{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 20px!important}#pick{font-size:15px;padding:10px 22px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer}#pick:hover{opacity:.9}#pick:disabled{opacity:.5;cursor:not-allowed}.tip{color:var(--muted);font-size:12px;text-align:left;margin-top:18px;line-height:1.5}.tip code{font-family:var(--mono);background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:1px 4px}.spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;margin:0 auto 16px;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}#loadview p{color:var(--muted);margin:0}#topbar{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--border);position:sticky;top:0}#brand{font-family:var(--mono);font-weight:700}#brand span{font-weight:400;color:var(--muted);font-size:12px;margin-left:6px}#cnt{color:var(--muted);font-size:12px;margin-left:auto}.btn{border:1px solid var(--border);background:transparent;color:var(--fg);border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px}.btn:hover{border-color:var(--accent);color:var(--accent)}#filters{padding:12px 16px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr;gap:8px}.row{display:flex;align-items:center;gap:8px}.row label{width:98px;flex-shrink:0;color:var(--muted);font-size:12px;white-space:nowrap}.row input[type=text],.row input[type=number],.row select{padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-family:var(--mono);font-size:13px}.row input[type=text]{flex:1}.row input.size-input{flex:0 0 100px;width:100px}.row input:focus,.row select:focus{outline:none;border-color:var(--accent)}.row.options{gap:16px}.row.options label{width:auto;display:flex;align-items:center;gap:4px}.hint{color:var(--muted);font-weight:400}#st{margin-left:auto;color:var(--muted);font-size:12px}#res{padding:8px 16px 40px}.file-block{margin-top:14px}.file-header{display:flex;align-items:baseline;gap:8px;padding:4px 0}.file-path{font-family:var(--mono);font-weight:600;cursor:pointer}.file-path:hover{color:var(--accent);text-decoration:underline}.match-count{color:var(--muted);font-size:12px}.file-size{color:var(--muted);font-size:11px;margin-left:auto}.exclude-btn{border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:5px;padding:1px 7px;cursor:pointer;font-size:11px;font-family:var(--mono)}.exclude-btn:hover{border-color:#ef4444;color:#ef4444}.line{display:flex;gap:10px;font-family:var(--mono);font-size:12.5px;padding:1px 0 1px 20px;white-space:pre-wrap;word-break:break-all}.lineno{color:var(--muted);min-width:3.5em;text-align:right;user-select:none}.line mark{background:var(--mark);color:var(--markfg);border-radius:2px}.empty{color:var(--muted);padding:24px 0;text-align:center}</style></head><body>
+<style>:root{color-scheme:light dark;--bg:#fff;--fg:#1a1a1a;--muted:#6b7280;--border:#e5e7eb;--panel:#f8f9fa;--accent:#2563eb;--mark:#fde68a;--markfg:#1a1a1a;--mono:ui-monospace,Consolas,Menlo,monospace}@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--fg:#e5e7eb;--muted:#9ca3af;--border:#262b36;--panel:#171a21;--accent:#60a5fa;--mark:#7c5b00;--markfg:#fde68a}}*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--fg);font:14px -apple-system,Segoe UI,Roboto,Arial,sans-serif}#ov{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center}#card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:36px 44px;max-width:420px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.35)}#card h1{font-family:var(--mono);margin:0 0 4px}#card p{color:var(--muted);margin:0 0 18px}.subtitle{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 20px!important}#pick{font-size:15px;padding:10px 22px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer}#pick:hover{opacity:.9}#pick:disabled{opacity:.5;cursor:not-allowed}.tip{color:var(--muted);font-size:12px;text-align:left;margin-top:18px;line-height:1.5}.tip code{font-family:var(--mono);background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:1px 4px}.spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;margin:0 auto 16px;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}#loadview p{color:var(--muted);margin:0}#topbar{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--border);position:sticky;top:0}#brand{font-family:var(--mono);font-weight:700}#brand span{font-weight:400;color:var(--muted);font-size:12px;margin-left:6px}#cnt{color:var(--muted);font-size:12px;margin-left:auto}#tx{padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-family:var(--mono);font-size:12px;width:180px}#tx:focus{outline:none;border-color:var(--accent)}.btn{border:1px solid var(--border);background:transparent;color:var(--fg);border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px}.btn:hover{border-color:var(--accent);color:var(--accent)}#filters{padding:12px 16px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr;gap:8px}.row{display:flex;align-items:center;gap:8px}.row label{width:98px;flex-shrink:0;color:var(--muted);font-size:12px;white-space:nowrap}.row input[type=text],.row input[type=number],.row select{padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-family:var(--mono);font-size:13px}.row input[type=text]{flex:1}.row input.size-input{flex:0 0 100px;width:100px}.row input:focus,.row select:focus{outline:none;border-color:var(--accent)}.row.options{gap:16px}.row.options label{width:auto;display:flex;align-items:center;gap:4px}.hint{color:var(--muted);font-weight:400}#st{margin-left:auto;color:var(--muted);font-size:12px}#res{padding:8px 16px 40px}.file-block{margin-top:14px}.file-header{display:flex;align-items:baseline;gap:8px;padding:4px 0}.file-path{font-family:var(--mono);font-weight:600;cursor:pointer}.file-path:hover{color:var(--accent);text-decoration:underline}.file-path.picked{background:#550685;color:#fff;padding:1px 5px;border-radius:3px}.match-count{color:var(--muted);font-size:12px}.file-size{color:var(--muted);font-size:11px;margin-left:auto}.exclude-btn{border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:5px;padding:1px 7px;cursor:pointer;font-size:11px;font-family:var(--mono)}.exclude-btn:hover{border-color:#ef4444;color:#ef4444}.line{display:flex;gap:10px;font-family:var(--mono);font-size:12.5px;padding:1px 0 1px 20px;white-space:pre-wrap;word-break:break-all}.lineno{color:var(--muted);min-width:3.5em;text-align:right;user-select:none}.line mark{background:var(--mark);color:var(--markfg);border-radius:2px}.empty{color:var(--muted);padding:24px 0;text-align:center}#tt{position:fixed;right:22px;bottom:22px;z-index:500;display:none;width:42px;height:42px;padding:0;border-radius:50%;font-size:18px;line-height:1;background:var(--panel);box-shadow:0 4px 16px rgba(0,0,0,.35)}</style></head><body>
 <div id=ov><div id=card><div id=pickview><h1>vgrep</h1><p class=subtitle>Local File Search Utility</p><p>To begin, select a folder to search. All processing is performed locally within your browser; no files or data are uploaded or transmitted.</p><button id=pick>Select Folder&hellip;</button><p id=pickmsg style="display:none;color:#ef4444;margin-top:14px"></p><p class=tip>For best results, select a specific folder, such as a project directory, rather than an entire drive or your user profile folder. For security reasons, your browser restricts access to broad system locations such as <code>C:\</code> or <code>C:\Users\&lt;username&gt;</code>. If you encounter this restriction, copy the files you wish to search into a dedicated folder and select that folder instead.</p></div><div id=loadview style="display:none"><div class=spinner></div><p id=loadtext>Scanning folder&hellip;</p></div></div></div>
-<div id=app><header id=topbar><div id=brand>vgrep <span id=rp></span></div><div id=cnt></div><button id=rb class=btn title="Re-scan the folder">Rescan</button><button id=ch class=btn title="Choose a different folder">Change folder</button></header><section id=filters><div class=row><label>Contains</label><input id=inc type=text placeholder="terms that must be present, comma-separated&hellip;"></div><div class=row><label>Doesn't contain</label><input id=exc type=text placeholder="terms that must NOT be present&hellip;"></div><div class=row><label>Files matching</label><input id=fi type=text placeholder="e.g. *.py, src/&hellip;"></div><div class=row><label>Exclude files</label><input id=fx type=text placeholder="e.g. node_modules, *.min.js&hellip;"></div><div class=row><label>Size</label><input id=mn type=number min=0 step=any placeholder=min class=size-input><span class=hint>to</span><input id=mx type=number min=0 step=any placeholder=max class=size-input><select id=un><option value=1 selected>B</option><option value=1024>KB</option><option value=1048576>MB</option><option value=1073741824>GB</option><option value=1099511627776>TB</option></select></div><div class="row options"><label><input id=rx type=checkbox> regex</label><label><input id=cs type=checkbox> case sensitive</label><label><input id=ea type=checkbox> expand all <span class=hint>(full file contents)</span></label><span id=st></span></div></section><main id=res></main></div>
+<div id=app><header id=topbar><div id=brand>vgrep <span id=rp></span></div><div id=cnt></div><input id=tx type=text placeholder="Doesn't contain&hellip;"><button id=cp class=btn title="Copy all currently visible results (or just your text selection, if any)">Copy All</button><button id=rb class=btn title="Re-scan the folder">Rescan</button><button id=ch class=btn title="Choose a different folder">Change folder</button></header><section id=filters><div class=row><label>Contains</label><input id=inc type=text placeholder="terms that must be present, comma-separated&hellip;"></div><div class=row><label>Doesn't contain</label><input id=exc type=text placeholder="terms that must NOT be present&hellip;"></div><div class=row><label>Files matching</label><input id=fi type=text placeholder="e.g. *.py, src/&hellip;"></div><div class=row><label>Exclude files</label><input id=fx type=text placeholder="e.g. node_modules, *.min.js&hellip;"></div><div class=row><label>Size</label><input id=mn type=number min=0 step=any placeholder=min class=size-input><span class=hint>to</span><input id=mx type=number min=0 step=any placeholder=max class=size-input><select id=un><option value=1 selected>B</option><option value=1024>KB</option><option value=1048576>MB</option><option value=1073741824>GB</option><option value=1099511627776>TB</option></select></div><div class="row options"><label><input id=rx type=checkbox> regex</label><label><input id=cs type=checkbox> case sensitive</label><label><input id=ea type=checkbox> expand all <span class=hint>(full file contents)</span></label><span id=st></span></div></section><main id=res></main></div>
+<button id=tt title="Back to top">&uarr;</button>
 <script>
 'use strict';
 const WK=`let S=[],X=-1,Q=null,U=false;const C=new Map();const B=new Set([".png",".jpg",".jpeg",".gif",".bmp",".ico",".webp",".tiff",".mp3",".mp4",".wav",".flac",".ogg",".mov",".avi",".mkv",".zip",".tar",".gz",".7z",".rar",".xz",".bz2",".exe",".dll",".so",".dylib",".bin",".class",".o",".obj",".pyc",".pdf",".pyd",".whl",".jar",".woff",".woff2",".ttf",".otf",".eot",".db",".sqlite",".sqlite3"]);
@@ -12,47 +13,14 @@ function Z(s){return s.replace(/[.*+?^\${}()|[\\]\\\\]/g,'\\\\$&');}
 function K(a,r,c){const l=c?'':'i';return a.filter(t=>t).map(t=>{const p=r?t:Z(t);try{return{t:new RegExp(p,l),g:new RegExp(p,l+'g')};}catch(e){const q=Z(t);return{t:new RegExp(q,l),g:new RegExp(q,l+'g')};}});}
 function G(a){let r='';for(const c of a){if(c==='*')r+='.*';else if(c==='?')r+='.';else if('.+^\${}()|\\\\'.includes(c))r+='\\\\'+c;else r+=c;}return new RegExp('^'+r+'\$');}
 function M(p,a){const l=p.toLowerCase();for(let o of a){o=o.trim();if(!o)continue;const w=o.toLowerCase();if(/[*?[]/.test(o)){if(G(w).test(l)||G('*'+w+'*').test(l))return true;}else if(l.includes(w))return true;}return false;}
-async function D(q){
-const{inc,exc,fi,fx,rx,cs,mnS,mxS,expA,maxF,maxM}=q;
-const a=K(inc,rx,cs),b=K(exc,rx,cs);
-let c=S;
-if(fi.length)c=c.filter(e=>M(e.path,fi));
-if(fx.length)c=c.filter(e=>!M(e.path,fx));
-if(mnS!=null)c=c.filter(e=>e.size>=mnS);
-if(mxS!=null)c=c.filter(e=>e.size<=mxS);
-const d=a.length||b.length||expA;
-if(!d){const l=c.slice(0,maxF);return{results:l.map(e=>({path:e.path,size:e.size,matchCount:0,lines:[]})),scanned:0,trunc:c.length>l.length};}
-const o=[];let s=0;
-for(let i=0;i<c.length;i++){
-if(Q)return null;
-const e=c[i];s++;
-const t=await T(e);
-if(Q)return null;
-if(t==null)continue;
-if(a.length&&!a.every(p=>p.t.test(t)))continue;
-if(b.length&&b.some(p=>p.t.test(t)))continue;
-const n=t.split(/\\r\\n|\\r|\\n/);
-const m=[];let k=0;
-function y(ln){const sp=[];for(const p of a){p.g.lastIndex=0;let x;while((x=p.g.exec(ln))){sp.push([x.index,x.index+x[0].length]);if(x[0].length===0)p.g.lastIndex++;}}sp.sort((u,v)=>u[0]-v[0]);return sp;}
-if(expA){
-const j=Math.min(n.length,1000);
-for(let g=0;g<j;g++){const r=n[g],sp=y(r);if(sp.length)k++;m.push({lineno:g+1,text:r.slice(0,500),spans:sp});}
-}else if(a.length){
-for(let g=0;g<n.length;g++){const r=n[g],sp=y(r);if(sp.length){m.push({lineno:g+1,text:r.slice(0,500),spans:sp});if(m.length>=maxM)break;}}
-k=m.length;
-}
-o.push({path:e.path,size:e.size,matchCount:k,lines:m});
-if(o.length>=maxF)return{results:o,scanned:s,trunc:true};
-}
-return{results:o,scanned:s,trunc:false};
-}
+async function D(q){const{inc,exc,fi,fx,rx,cs,mnS,mxS,expA,maxF,maxM}=q;const a=K(inc,rx,cs),b=K(exc,rx,cs);let c=S;if(fi.length)c=c.filter(e=>M(e.path,fi));if(fx.length)c=c.filter(e=>!M(e.path,fx));if(mnS!=null)c=c.filter(e=>e.size>=mnS);if(mxS!=null)c=c.filter(e=>e.size<=mxS);const d=a.length||b.length||expA;if(!d){const l=c.slice(0,maxF);return{results:l.map(e=>({path:e.path,size:e.size,matchCount:0,lines:[]})),scanned:0,trunc:c.length>l.length};}const o=[];let s=0;for(let i=0;i<c.length;i++){if(Q)return null;const e=c[i];s++;const t=await T(e);if(Q)return null;if(t==null)continue;if(a.length&&!a.every(p=>p.t.test(t)))continue;if(b.length&&b.some(p=>p.t.test(t)))continue;const n=t.split(/\\r\\n|\\r|\\n/);const m=[];let k=0;function y(ln){const sp=[];for(const p of a){p.g.lastIndex=0;let x;while((x=p.g.exec(ln))){sp.push([x.index,x.index+x[0].length]);if(x[0].length===0)p.g.lastIndex++;}}sp.sort((u,v)=>u[0]-v[0]);return sp;}if(expA){const j=Math.min(n.length,1000);for(let g=0;g<j;g++){const r=n[g],sp=y(r);if(sp.length)k++;m.push({lineno:g+1,text:r.slice(0,500),spans:sp});}}else if(a.length){for(let g=0;g<n.length;g++){const r=n[g],sp=y(r);if(sp.length){m.push({lineno:g+1,text:r.slice(0,500),spans:sp});if(m.length>=maxM)break;}}k=m.length;}o.push({path:e.path,size:e.size,matchCount:k,lines:m});if(o.length>=maxF)return{results:o,scanned:s,trunc:true};}return{results:o,scanned:s,trunc:false};}
 async function P(){U=true;while(Q){const q=Q;Q=null;const r=await D(q);if(Q===null&&r)postMessage({type:'result',gen:q.gen,idx:X,...r});}U=false;}
 self.onmessage=(v)=>{const d=v.data;if(d.type==='shard'){S=d.files;X=d.idx;return;}if(d.type==='clear'){C.clear();return;}if(d.type==='search'){Q=d;if(!U)P();}};`;
 const $=id=>document.getElementById(id);
-const ov=$('ov'),pickview=$('pickview'),loadview=$('loadview'),loadtext=$('loadtext'),pickBtn=$('pick'),chBtn=$('ch'),rbBtn=$('rb'),pickmsg=$('pickmsg');
-const inc=$('inc'),exc=$('exc'),fi=$('fi'),fx=$('fx'),mn=$('mn'),mx=$('mx'),un=$('un'),rx=$('rx'),cs=$('cs'),ea=$('ea');
+const ov=$('ov'),pickview=$('pickview'),loadview=$('loadview'),loadtext=$('loadtext'),pickBtn=$('pick'),chBtn=$('ch'),rbBtn=$('rb'),cpBtn=$('cp'),ttBtn=$('tt'),pickmsg=$('pickmsg');
+const inc=$('inc'),exc=$('exc'),fi=$('fi'),fx=$('fx'),mn=$('mn'),mx=$('mx'),un=$('un'),rx=$('rx'),cs=$('cs'),ea=$('ea'),tx=$('tx');
 const rp=$('rp'),cnt=$('cnt'),st=$('st'),res=$('res');
-let dirH=null,workers=[],NW=0,gen=0,pend=[],allFiles=[],dbTimer=null;
+let dirH=null,workers=[],NW=0,gen=0,pend=[],allFiles=[],dbTimer=null,LR=[],PK=new Set(),PG=120,LD=false,OBS=null;
 function A(v){return v.split(',').map(s=>s.trim()).filter(s=>s);}
 function B(v){const s=v.trim();if(!s)return null;const n=parseFloat(s);if(Number.isNaN(n))return null;return Math.round(n*parseFloat(un.value));}
 function F(b){if(b<1024)return b+' B';if(b<1024*1024)return(b/1024).toFixed(1)+' KB';return(b/1024/1024).toFixed(1)+' MB';}
@@ -61,37 +29,26 @@ function I(t,spans){if(!spans||!spans.length)return H(t);const sp=spans.slice().
 const WKURL=URL.createObjectURL(new Blob([WK],{type:'application/javascript'}));
 function J(n){workers.forEach(w=>w.terminate());workers=[];for(let i=0;i<n;i++){const w=new Worker(WKURL);w.onmessage=O;workers.push(w);}NW=n;}
 async function L(items,limit,fn){let i=0;async function w(){while(i<items.length){const x=i++;await fn(items[x],x);}}await Promise.all(Array.from({length:Math.min(limit,items.length)},w));}
-async function W(handle,relDir,acc){
-const ents=[];
-for await(const h of handle.values())ents.push(h);
-const subdirs=ents.filter(h=>h.kind==='directory');
-const files=ents.filter(h=>h.kind!=='directory');
-await L(files,48,async(h)=>{const p=relDir?relDir+'/'+h.name:h.name;let f;try{f=await h.getFile();}catch(e){return;}acc.push({path:p,handle:h,size:f.size});if(acc.length%500===0){const s='Scanning… '+acc.length+' files found';st.textContent=s;loadtext.textContent=s;}});
-for(const h of subdirs){const p=relDir?relDir+'/'+h.name:h.name;await W(h,p,acc);}
-}
-async function Z(){
-allFiles.sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
-const n=Math.max(1,Math.min(navigator.hardwareConcurrency||4,8));
-J(n);
-const per=Math.ceil(allFiles.length/n)||1;
-for(let i=0;i<n;i++){const shard=allFiles.slice(i*per,(i+1)*per).map(e=>({path:e.path,handle:e.handle,size:e.size}));workers[i].postMessage({type:'shard',files:shard,idx:i});}
-rp.textContent=dirH.name;
-cnt.textContent=allFiles.length+' files';
-R();
-}
-function Y(){const a=A(inc.value),b=A(fi.value),c=A(fx.value);const only=a.length===0&&(b.length>0||c.length>0);const e=ea.checked||only;ea.checked=e;return{inc:a,exc:A(exc.value),fi:b,fx:c,rx:rx.checked,cs:cs.checked,expA:e,mnS:B(mn.value),mxS:B(mx.value),maxF:120,maxM:15};}
+async function W(handle,relDir,acc){const ents=[];for await(const h of handle.values())ents.push(h);const subdirs=ents.filter(h=>h.kind==='directory');const files=ents.filter(h=>h.kind!=='directory');await L(files,48,async(h)=>{const p=relDir?relDir+'/'+h.name:h.name;let f;try{f=await h.getFile();}catch(e){return;}acc.push({path:p,handle:h,size:f.size});if(acc.length%500===0){const s='Scanning… '+acc.length+' files found';st.textContent=s;loadtext.textContent=s;}});for(const h of subdirs){const p=relDir?relDir+'/'+h.name:h.name;await W(h,p,acc);}}
+async function Z(){allFiles.sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);const n=Math.max(1,Math.min(navigator.hardwareConcurrency||4,8));J(n);const per=Math.ceil(allFiles.length/n)||1;for(let i=0;i<n;i++){const shard=allFiles.slice(i*per,(i+1)*per).map(e=>({path:e.path,handle:e.handle,size:e.size}));workers[i].postMessage({type:'shard',files:shard,idx:i});}rp.textContent=dirH.name;cnt.textContent=allFiles.length+' files';R();}
+function Y(){const a=A(inc.value),b=A(fi.value),c=A(fx.value);const only=a.length===0&&(b.length>0||c.length>0);const e=ea.checked||only;ea.checked=e;return{inc:a,exc:A(exc.value),fi:b,fx:c,rx:rx.checked,cs:cs.checked,expA:e,mnS:B(mn.value),mxS:B(mx.value),maxF:PG,maxM:15};}
 function R(){if(!workers.length)return;gen++;const g=gen;pend=new Array(NW).fill(null);const p=Y();for(let i=0;i<NW;i++)workers[i].postMessage({type:'search',gen:g,idx:i,...p});}
 function O(ev){const m=ev.data;if(m.type!=='result'||m.gen!==gen)return;pend[m.idx]=m;if(pend.every(r=>r))N();}
-function N(){let results=[],scanned=0,trunc=false;for(const r of pend){results=results.concat(r.results);scanned+=r.scanned;if(r.trunc)trunc=true;}const maxF=120;if(results.length>maxF){trunc=true;results=results.slice(0,maxF);}D({results,scanned,total:allFiles.length,matched:results.length,trunc});}
+function N(){let results=[],scanned=0,trunc=false;for(const r of pend){results=results.concat(r.results);scanned+=r.scanned;if(r.trunc)trunc=true;}if(results.length>PG){trunc=true;results=results.slice(0,PG);}LD=false;D({results,scanned,total:allFiles.length,matched:results.length,trunc});}
 function E(p){const cur=A(fx.value);if(!cur.includes(p)){cur.push(p);fx.value=cur.join(', ');}R();}
+function P(paths){const items=LR.filter(r=>paths.includes(r.path));const text=items.map(i=>i.path+'\n'+i.lines.map(l=>l.text).join('\n')).join('\n\n');const html=items.map(i=>'<b>'+H(i.path)+'</b><br>'+i.lines.map(l=>H(l.text)).join('<br>')).join('<br><br>');return{text,html};}
+async function V(text,html){try{await navigator.clipboard.write([new ClipboardItem({'text/plain':new Blob([text],{type:'text/plain'}),'text/html':new Blob([html],{type:'text/html'})})]);}catch(err){try{await navigator.clipboard.writeText(text);}catch(e2){}}}
+function G(){const{text,html}=P([...PK]);V(text,html);}
+function selPaths(){const sel=window.getSelection();if(!sel||sel.isCollapsed||sel.rangeCount===0)return[];return[...res.querySelectorAll('.file-block')].filter(b=>sel.containsNode(b,true)).map(b=>b.dataset.path);}
 function D(d){
+LR=d.results;
 const frag=document.createDocumentFragment();
 if(!d.results.length){const e=document.createElement('div');e.className='empty';e.textContent='No matching files found.';frag.appendChild(e);}
 else for(const r of d.results){
-const block=document.createElement('div');block.className='file-block';
+const block=document.createElement('div');block.className='file-block';block.dataset.path=r.path;
 const header=document.createElement('div');header.className='file-header';
-const xb=document.createElement('button');xb.type='button';xb.className='exclude-btn';xb.textContent='exclude';xb.title='Exclude '+r.path+' from results';xb.addEventListener('click',e=>{e.stopPropagation();E(r.path);});header.appendChild(xb);
-const path=document.createElement('span');path.className='file-path';path.textContent=r.path;path.title='Click to copy path';path.addEventListener('click',()=>{navigator.clipboard.writeText(r.path).catch(()=>{});});header.appendChild(path);
+const xb=document.createElement('button');xb.type='button';xb.className='exclude-btn';xb.textContent='exclude';xb.addEventListener('click',e=>{e.stopPropagation();E(r.path);});header.appendChild(xb);
+const path=document.createElement('span');path.className='file-path'+(PK.has(r.path)?' picked':'');path.textContent=r.path;path.title='Click to add/remove this file (title + matched lines) from the clipboard';path.addEventListener('click',()=>{if(PK.has(r.path)){PK.delete(r.path);path.classList.remove('picked');}else{PK.add(r.path);path.classList.add('picked');}G();});header.appendChild(path);
 if(r.matchCount>0){const mc=document.createElement('span');mc.className='match-count';mc.textContent=r.matchCount+(r.matchCount===1?' match':' matches');header.appendChild(mc);}
 const sz=document.createElement('span');sz.className='file-size';sz.textContent=F(r.size);header.appendChild(sz);
 block.appendChild(header);
@@ -99,14 +56,21 @@ for(const line of r.lines){const ld=document.createElement('div');ld.className='
 frag.appendChild(block);
 }
 res.replaceChildren(frag);
+if(OBS){OBS.disconnect();OBS=null;}
+if(d.trunc){const sentinel=document.createElement('div');sentinel.style.height='1px';res.appendChild(sentinel);OBS=new IntersectionObserver(en=>{if(en[0].isIntersecting&&!LD){LD=true;PG+=120;R();}});OBS.observe(sentinel);}
 let s='scanned '+d.scanned+' / '+d.total+' files, '+d.matched+' matched';
-if(d.trunc)s+=' (results truncated — refine your filters to narrow the search)';
+if(d.trunc)s+=' (scroll down to load more)';
 st.textContent=s;
 }
-function C(){clearTimeout(dbTimer);dbTimer=setTimeout(R,80);}
+cpBtn.addEventListener('click',()=>{const paths=selPaths();const{text,html}=P(paths.length?paths:LR.map(r=>r.path));V(text,html);});
+window.addEventListener('scroll',()=>{ttBtn.style.display=window.scrollY>400?'block':'none';});
+ttBtn.addEventListener('click',()=>{window.scrollTo(0,0);});
+function C(){PG=120;clearTimeout(dbTimer);dbTimer=setTimeout(R,80);}
 [inc,exc,fi,fx,mn,mx].forEach(e=>e.addEventListener('input',C));
 [rx,cs,ea,un].forEach(e=>e.addEventListener('change',C));
 inc.addEventListener('input',()=>{if(inc.value.trim()&&ea.checked)ea.checked=false;});
+exc.addEventListener('input',()=>{tx.value=exc.value;});
+tx.addEventListener('input',()=>{exc.value=tx.value;C();});
 rbBtn.addEventListener('click',async()=>{st.textContent='Rescanning…';workers.forEach(w=>w.postMessage({type:'clear'}));allFiles=[];await W(dirH,'',allFiles);await Z();});
 chBtn.addEventListener('click',()=>{pickview.style.display='block';loadview.style.display='none';ov.style.display='flex';});
 pickBtn.addEventListener('click',async()=>{
@@ -115,7 +79,7 @@ pickmsg.style.display='none';
 let h;
 try{h=await window.showDirectoryPicker();}
 catch(e){if(e.name!=='AbortError'){pickmsg.textContent='The selected folder could not be opened. If you received a message stating the folder contains system files, please choose a more specific folder. See the guidance below for details.';pickmsg.style.display='block';}return;}
-dirH=h;
+dirH=h;PK.clear();
 pickview.style.display='none';
 loadview.style.display='block';
 loadtext.textContent='Scanning folder…';
