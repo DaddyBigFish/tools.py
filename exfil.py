@@ -60,7 +60,7 @@ def rce():
  print('\033[92mConnected\033[0m')
  print('Host: '+request.remote_addr)
  print('User-Agent: '+request.headers.get('User-Agent',''))
- print('Value:')
+ print('Command-Output:')
  print(v)
  print('----------------------------------------------------')
  print()
