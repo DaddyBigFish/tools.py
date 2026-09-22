@@ -184,6 +184,21 @@ def should_exclude(hostname, exhosts):
     return any(ex in hostname for ex in exhosts)
 
 
+def generate_lists(hosts_data, prefix, target_ports=None):
+    by_port = {}
+    for host, entries in hosts_data.items():
+        for portid, _ in entries:
+            if target_ports and portid not in target_ports:
+                continue
+            by_port.setdefault(portid, set()).add(host)
+    for portid in sorted(by_port, key=int):
+        fn = f"{prefix}_port_{portid}"
+        with open(fn, "w") as f:
+            for ip in sorted(by_port[portid], key=ipaddress.ip_address):
+                f.write(ip + "\n")
+        print(f"{fn}: {len(by_port[portid])} hosts")
+
+
 def print_basic(hosts_data, exhosts, target_ports, dns_server=None, no_hostname=False):
     for host, entries in sorted(hosts_data.items(), key=lambda x: ipaddress.ip_address(x[0])):
         hostname = "" if no_hostname else get_hostname(host, dns_server)
@@ -249,6 +264,7 @@ if __name__ == "__main__":
     ips_only = "--ips" in sys.argv
     allports = "--allports" in sys.argv
     no_hostname = "--no-hostname" in sys.argv
+    generate = "--generate" in sys.argv
 
     target_arg = None
     target_ports = None
@@ -258,7 +274,7 @@ if __name__ == "__main__":
     i = 1
     while i < len(sys.argv):
         arg = sys.argv[i]
-        if arg in ("--basic", "--ips", "--allports", "--no-hostname"):
+        if arg in ("--basic", "--ips", "--allports", "--no-hostname", "--generate"):
             pass
         elif arg == "-p" and i + 1 < len(sys.argv):
             target_ports = set(sys.argv[i + 1].split(","))
@@ -283,7 +299,7 @@ if __name__ == "__main__":
 
     # Auto-detect port filter from filename e.g. hosts_port_445 or hosts_port_445_80
     if target_arg and target_ports is None:
-        m = re.search(r'hosts_port_(\d+(?:_\d+)*)', os.path.basename(target_arg))
+        m = re.search(r'port_(\d+(?:_\d+)*)', os.path.basename(target_arg))
         if m:
             target_ports = set(m.group(1).split("_"))
 
@@ -311,7 +327,10 @@ if __name__ == "__main__":
         console.print(f"[bold blue][*] Using DNS server: {dns_server}[/bold blue]")
 
     if hosts:
-        if allports:
+        if generate:
+            prefix = os.path.basename(target_arg) if target_arg else "hosts"
+            generate_lists(hosts, prefix, target_ports)
+        elif allports:
             print_allports(hosts, exhosts, dns_server, no_hostname)
         elif ips_only:
             print_ips_only(hosts, exhosts, target_ports, dns_server, no_hostname)
