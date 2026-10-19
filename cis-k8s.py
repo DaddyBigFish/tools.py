@@ -132,10 +132,27 @@ def sh(c, t=60):
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
+MISSING_PERMS = []
+def note_perm(err):
+    m = re.search(r'cannot (list|get|watch|create|delete|update|patch) resources? "([^"]+)"(?: in API group "([^"]*)")?', err or "")
+    if m:
+        MISSING_PERMS.append(f"Kubernetes RBAC: allow '{m.group(1)}' on '{m.group(2)}'" + (f" (api group {m.group(3)})" if m.group(3) else ""))
+        return True
+    m = re.search(r'not authorized to perform: ([a-z0-9:*_-]+)', err or "", re.I)
+    if m:
+        MISSING_PERMS.append(f"AWS IAM: allow action '{m.group(1)}'")
+        return True
+    if "AccessDenied" in (err or "") or "UnauthorizedOperation" in (err or ""):
+        MISSING_PERMS.append("AWS IAM: " + (err.strip().splitlines() or [""])[-1][:120])
+        return True
+    return False
+
 def jsh(c):
     rc, o, e = sh(c)
     try: return json.loads(o)
-    except: return None
+    except:
+        if rc != 0: note_perm(e)
+        return None
 
 def detect_provider():
     if have("kubectl"):
@@ -261,9 +278,13 @@ spec:
 """
 
 def per_node_bench(prov):
-    if not have("kubectl"): return []
+    if not have("kubectl") and not have("kubectl.exe"):
+        print("[-] per-node skipped: kubectl not found")
+        return []
     nodes = [n["metadata"]["name"] for n in (jsh("kubectl get nodes -o json") or {}).get("items", [])]
-    if not nodes: return []
+    if not nodes:
+        print("[-] per-node skipped: cluster unreachable (check kubeconfig)")
+        return []
     b = BENCH.get(prov) or "cis-1.12"
     print(f"[*] per-node kube-bench ({b}) on {len(nodes)} node(s)")
     results = []
@@ -276,7 +297,10 @@ def per_node_bench(prov):
         sh("kubectl delete job cis-k8s-bench-" + name + " --ignore-not-found", 60)
         rc, o, e = sh("kubectl apply -f " + jf, 60)
         if rc != 0:
-            print(f"  [-] {n}: job apply failed: {e[:120]}")
+            if not note_perm(e):
+                print(f"  [-] {n}: job apply failed: {e[:120]}")
+            else:
+                print(f"  [-] {n}: job apply denied (permission noted below)")
             continue
         for _ in range(60):
             rc, o, e = sh(f"kubectl wait --for=condition=complete --timeout=10s job/cis-k8s-bench-{name}", 15)
@@ -324,8 +348,20 @@ def run_bench(prov):
 # ---------------- built-in API checks (kubectl, provider-agnostic) ----------------
 def api_checks():
     out = []
-    if not have("kubectl"): return out
-    if sh("kubectl version --request-timeout=8s")[0] != 0: return out
+    if not have("kubectl") and not have("kubectl.exe"):
+        print("[-] kubectl not found - run: python3 cis-k8s.py --install")
+        return out
+    if sh("kubectl version --client")[0] != 0:
+        print("[-] kubectl present but broken")
+        return out
+    rc, o, e = sh("kubectl get nodes --request-timeout=10s")
+    if rc != 0:
+        if note_perm(e):
+            print("[-] connected, but your identity lacks permission - details collected for the platform team")
+        else:
+            print("[-] kubectl works but cannot reach a cluster - check kubeconfig (EKS: aws eks update-kubeconfig --name <cluster>)")
+            print("    " + (e.strip().splitlines() or ["no cluster"])[-1][:120])
+        return out
     def add(cid, desc, ok, rem, evid=""):
         r = {"id": cid, "desc": desc, "status": "PASS" if ok else "FAIL", "remediation": rem, "evidence": evid, "src": "api"}
         out.append(r); show(r)
@@ -371,6 +407,18 @@ def api_checks():
     sa = (jsh("kubectl get serviceaccounts -A -o json") or {}).get("items", [])
     am = [s["metadata"]["namespace"] + "/" + s["metadata"]["name"] for s in sa if s.get("automountServiceAccountToken") is True and s["metadata"]["name"] != "default"]
     add("5.1.6", "automountServiceAccountToken disabled unless needed", not am, "Set automountServiceAccountToken: false", ",".join(am[:5]))
+
+    rq = {(x["metadata"]["namespace"]) for x in (jsh("kubectl get resourcequotas -A -o json") or {}).get("items", [])}
+    norq = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in rq]
+    add("5.4.x", "All namespaces have ResourceQuotas", not norq, "Create ResourceQuota per namespace (namespace segregation)", ",".join(norq[:5]))
+    lr = {(x["metadata"]["namespace"]) for x in (jsh("kubectl get limitranges -A -o json") or {}).get("items", [])}
+    nolr = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in lr]
+    add("5.4.x", "All namespaces have LimitRanges", not nolr, "Create LimitRange per namespace for default requests/limits", ",".join(nolr[:5]))
+
+    if CUR_PROV == "eks":
+        noi = [s["metadata"]["namespace"] + "/" + s["metadata"]["name"] for s in sa
+               if s.get("automountServiceAccountToken") is not False and "eks.amazonaws.com/role-arn" not in (s.get("annotations") or {}) and s["metadata"]["name"] != "default"]
+        add("EKS-SA", "Service accounts use IRSA instead of node instance role", not noi, "Annotate SAs with eks.amazonaws.com/role-arn (IRSA) or disable automount; node role credentials are otherwise exposed to pods", ",".join(noi[:5]))
     return out
 
 # ---------------- extra (non-CIS) template checks ----------------
@@ -424,6 +472,8 @@ def cli_checks(prov):
     def add(cid, desc, ok, rem, evid=""):
         r = {"id": cid, "desc": desc, "status": "PASS" if ok else "FAIL", "remediation": rem, "evidence": evid, "src": "cli"}
         out.append(r); show(r)
+    if prov == "eks" and not have("aws"):
+        print("[-] eks cli checks skipped: aws CLI not found")
     if prov == "eks" and have("aws"):
         cl = jsh("aws eks list-clusters --output json") or {}
         for n in cl.get("clusters", []):
@@ -438,6 +488,8 @@ def cli_checks(prov):
             try: ve = float(c.get("version", "0"))
             except: ve = 0.0
             add("5.1.1", f"[{n}] Supported Kubernetes version", ve >= 1.28, "Upgrade cluster to a supported version", c.get("version", ""))
+    if prov == "aks" and not have("az"):
+        print("[-] aks cli checks skipped: az CLI not found")
     if prov == "aks" and have("az"):
         cl = jsh("az aks list -o json") or []
         for c in cl:
@@ -451,6 +503,8 @@ def cli_checks(prov):
             try: va = float(".".join(str(c.get("kubernetesVersion", "0")).split(".")[:2]))
             except: va = 0.0
             add("5.3.1", f"[{n}] Supported version", va >= 1.28, "Upgrade cluster", c.get("kubernetesVersion", ""))
+    if prov == "gke" and not have("gcloud"):
+        print("[-] gke cli checks skipped: gcloud CLI not found")
     if prov == "gke" and have("gcloud"):
         rc, o, e = sh("gcloud container clusters list --format=json")
         try: cl = json.loads(o)
@@ -512,6 +566,18 @@ def render(results, prov, outdir):
         for r in unc:
             md.append(f"- `{r['id']}` {r['desc']}" + (f" â€” remediation: {r['remediation']}" if r.get("remediation") else ""))
         md.append("\n---\n")
+    nsmap = {}
+    for r in fails:
+        for m2 in re.findall(r"([\w.-]+)/([\w.-]+)@[\w.-]+", r.get("evidence", "")):
+            nsmap.setdefault(m2[0], []).append(r)
+    if nsmap:
+        md.append("\n---\n")
+        md.append("# Per-Namespace Breakdown")
+        md.append("| Namespace | Non-compliant checks | Findings |")
+        md.append("|---|---|---|")
+        for nsn, rrs in sorted(nsmap.items(), key=lambda kv: -len(kv[1])):
+            tpls = sorted({r.get("template") or "unmapped" for r in rrs})
+            md.append(f"| `{nsn}` | {len(rrs)} | {', '.join(tpls)} |")
     rep = os.path.join(outdir, "report.md")
     open(rep, "w").write("\n".join(md))
     return rep
@@ -602,6 +668,14 @@ def main():
     print(f"[+] {render(results, prov, a.out)}")
     fails = sum(1 for r in results if r["status"] == "FAIL")
     xf = sum(1 for r in results if r["status"] == "FAIL" and r.get("src") == "extra")
+    if MISSING_PERMS:
+        print("\n[!] PERMISSIONS REQUIRED (share with the AWS / platform team):")
+        for p in sorted(set(MISSING_PERMS)):
+            print("    - " + p)
+        print("    the current identity was denied these; grant them (read-only) and rerun")
+    if not results:
+        print("[!] nothing was checked - no cluster reachable and no cloud CLI available")
+        print("    fastest fix: aws eks update-kubeconfig --name <cluster>  (then rerun)")
     print(f"[*] done: {len(results)} checks run: {fails - xf} CIS controls and {xf} additional checks not met")
 
 if __name__ == "__main__":
