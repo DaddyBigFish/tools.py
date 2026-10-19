@@ -287,6 +287,7 @@ def per_node_bench(prov):
         return []
     b = BENCH.get(prov) or "cis-1.12"
     print(f"[*] per-node kube-bench ({b}) on {len(nodes)} node(s)")
+    fails = []
     results = []
     for n in nodes:
         name = re.sub(r"[^a-z0-9-]", "-", n.lower())[:50]
@@ -297,10 +298,8 @@ def per_node_bench(prov):
         sh("kubectl delete job cis-k8s-bench-" + name + " --ignore-not-found", 60)
         rc, o, e = sh("kubectl apply -f " + jf, 60)
         if rc != 0:
-            if not note_perm(e):
-                print(f"  [-] {n}: job apply failed: {e[:120]}")
-            else:
-                print(f"  [-] {n}: job apply denied (permission noted below)")
+            note_perm(e)
+            fails.append((n, e.strip().splitlines()[-1][:100] if e.strip() else "apply failed"))
             continue
         for _ in range(60):
             rc, o, e = sh(f"kubectl wait --for=condition=complete --timeout=10s job/cis-k8s-bench-{name}", 15)
@@ -315,6 +314,13 @@ def per_node_bench(prov):
         except Exception:
             print(f"  [-] {n}: no results (job may still be running, check: kubectl logs -l job-name=cis-k8s-bench-{name})")
         sh("kubectl delete job cis-k8s-bench-" + name + " --ignore-not-found", 60)
+    if fails:
+        denied = [f for f in fails if "orbidden" in f[1] or "denied" in f[1].lower() or "Unauthorized" in f[1]]
+        if denied:
+            print(f"  [-] job creation denied by RBAC on {len(denied)}/{len(nodes)} nodes (permission recorded below)")
+        for n, e in fails[:3]:
+            if not denied:
+                print(f"  [-] {n}: {e}")
     return results
 
 # ---------------- kube-bench ----------------
@@ -331,7 +337,7 @@ COVERAGE = {"vanilla": "engine cis-1.12 == CIS Kubernetes Benchmark v2.0.1 (124/
  "openshift": "engine rh-1.9 == CIS OpenShift Benchmark v1.9.0 (latest)"}
 def run_bench(prov):
     if not have("kube-bench") and not os.path.isfile(kb_bin()):
-        msg = "kube-bench not available on Windows - use --per-node for in-cluster node checks" if IS_WIN else "kube-bench not installed (--install)"
+        msg = "kube-bench unavailable on this host OS (node configs are checked via --per-node jobs instead)" if IS_WIN else "kube-bench not installed (run with --install to bootstrap)"
         return None, msg
     b = BENCH.get(prov)
     c = f'"{kb_bin()}" run --json' if os.path.sep in kb_bin() else f"{kb_bin()} run --json"
@@ -552,8 +558,11 @@ def render(results, prov, outdir):
         for r in rs:
             md.append(f"- `{r['id']}` {r['desc']}" + (f" â€” evidence: `{r['evidence']}`" if r.get("evidence") else ""))
         nodeset = sorted({r["node"] for r in rs if r.get("node")} | {ev.split("@", 1)[1] for r in rs for ev in re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r.get("evidence", ""))})
+        scopes = {r.get("scope", "cluster-wide") for r in rs}
         if nodeset:
             md.append("\n**Affected nodes:** " + ", ".join(f"`{n}`" for n in nodeset))
+        elif scopes == {"cluster-wide"}:
+            md.append("\n**Scope:** cluster-wide (control plane / admission configuration, not a specific host)")
         md.append("\n**Details:** " + m.get("details", "").split("[^footnote")[0][:800])
         md.append("\n**Recommendation:** " + m.get("rec", ""))
         rem = {r["remediation"] for r in rs if r.get("remediation")}
@@ -638,7 +647,15 @@ def main():
     cc = cli_checks(prov); print(f"[+] cli checks: {len(cc)}")
     ec = extra_checks(); print(f"[+] extra (non-CIS) checks: {len(ec)}")
     results += ac + cc + ec
-    for r in results: r["template"] = r.get("template") or to_tpl(r["id"], r["desc"], prov)
+    for r in results:
+        r["template"] = r.get("template") or to_tpl(r["id"], r["desc"], prov)
+        if r.get("node"):
+            r["scope"] = "node: " + r["node"]
+        elif re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r.get("evidence", "")):
+            ns = sorted({m.split("@")[1] for m in re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r["evidence"])})
+            r["scope"] = ("nodes: " + ", ".join(ns)) if ns else "cluster-wide"
+        else:
+            r["scope"] = "cluster-wide"
     if VERBOSE:
         global TPLC
         if TPLC is None:
@@ -651,7 +668,8 @@ def main():
         print("\n[*] FINDINGS:")
         for r in mapped:
             risk = TPLC.get(r["template"], {}).get("risk", "Medium").upper()
-            print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m")
+            sc = r.get("scope", "cluster-wide")
+            print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m \033[37m({sc})\033[0m")
         print("  " + "-" * 64)
         print("[*] CIS BENCHMARK:")
         fc = [r["id"] for r in results if r["status"] == "FAIL" and r["id"] != "EXTRA"]
