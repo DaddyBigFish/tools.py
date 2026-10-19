@@ -299,7 +299,14 @@ def per_node_bench(prov):
         rc, o, e = sh("kubectl apply -f " + jf, 60)
         if rc != 0:
             note_perm(e)
-            fails.append((n, e.strip().splitlines()[-1][:100] if e.strip() else "apply failed"))
+            reason = ""
+            m2 = re.search(r"Error from server \([^)]*\): (.+)", e or "")
+            if m2: reason = m2.group(1)
+            else:
+                for ln in (e or "").splitlines():
+                    if "from server for" in ln or ln.strip().startswith("error when"): continue
+                    if ln.strip(): reason = ln.strip(); break
+            fails.append((n, reason[:140] or "apply failed"))
             continue
         for _ in range(60):
             rc, o, e = sh(f"kubectl wait --for=condition=complete --timeout=10s job/cis-k8s-bench-{name}", 15)
@@ -315,12 +322,10 @@ def per_node_bench(prov):
             print(f"  [-] {n}: no results (job may still be running, check: kubectl logs -l job-name=cis-k8s-bench-{name})")
         sh("kubectl delete job cis-k8s-bench-" + name + " --ignore-not-found", 60)
     if fails:
-        denied = [f for f in fails if "orbidden" in f[1] or "denied" in f[1].lower() or "Unauthorized" in f[1]]
-        if denied:
-            print(f"  [-] job creation denied by RBAC on {len(denied)}/{len(nodes)} nodes (permission recorded below)")
-        for n, e in fails[:3]:
-            if not denied:
-                print(f"  [-] {n}: {e}")
+        byreason = {}
+        for n, e in fails: byreason.setdefault(e, []).append(n)
+        for e, ns in byreason.items():
+            print(f"  [-] {len(ns)}/{len(nodes)} nodes: {e}")
     return results
 
 # ---------------- kube-bench ----------------
@@ -337,7 +342,7 @@ COVERAGE = {"vanilla": "engine cis-1.12 == CIS Kubernetes Benchmark v2.0.1 (124/
  "openshift": "engine rh-1.9 == CIS OpenShift Benchmark v1.9.0 (latest)"}
 def run_bench(prov):
     if not have("kube-bench") and not os.path.isfile(kb_bin()):
-        msg = "kube-bench unavailable on this host OS (node configs are checked via --per-node jobs instead)" if IS_WIN else "kube-bench not installed (run with --install to bootstrap)"
+        msg = "kube-bench is not supported on this host OS; node-level checks run via --per-node in-cluster jobs instead" if IS_WIN else "kube-bench is not installed (run with --install to bootstrap)"
         return None, msg
     b = BENCH.get(prov)
     c = f'"{kb_bin()}" run --json' if os.path.sep in kb_bin() else f"{kb_bin()} run --json"
@@ -558,11 +563,11 @@ def render(results, prov, outdir):
         for r in rs:
             md.append(f"- `{r['id']}` {r['desc']}" + (f" â€” evidence: `{r['evidence']}`" if r.get("evidence") else ""))
         nodeset = sorted({r["node"] for r in rs if r.get("node")} | {ev.split("@", 1)[1] for r in rs for ev in re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r.get("evidence", ""))})
-        scopes = {r.get("scope", "cluster-wide") for r in rs}
+        scopes = {r.get("scope", "entire cluster") for r in rs}
         if nodeset:
             md.append("\n**Affected nodes:** " + ", ".join(f"`{n}`" for n in nodeset))
-        elif scopes == {"cluster-wide"}:
-            md.append("\n**Scope:** cluster-wide (control plane / admission configuration, not a specific host)")
+        elif scopes == {"entire cluster"}:
+            md.append("\n**Scope:** entire cluster (control plane / admission configuration, not a specific host)")
         md.append("\n**Details:** " + m.get("details", "").split("[^footnote")[0][:800])
         md.append("\n**Recommendation:** " + m.get("rec", ""))
         rem = {r["remediation"] for r in rs if r.get("remediation")}
@@ -639,7 +644,7 @@ def main():
                     n += 1
             print(f"[+] kube-bench: {n} checks")
         else:
-            print(f"[-] kube-bench skipped: {err} (node-level checks need to run on a node; API/CLI checks continue)")
+            print(f"[-] kube-bench skipped: {err} (API and cloud checks continue)")
     if getattr(a, "per_node", False):
         pn = per_node_bench(prov); print(f"[+] per-node kube-bench: {len(pn)} results across nodes")
         results.extend(pn)
@@ -653,9 +658,9 @@ def main():
             r["scope"] = "node: " + r["node"]
         elif re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r.get("evidence", "")):
             ns = sorted({m.split("@")[1] for m in re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r["evidence"])})
-            r["scope"] = ("nodes: " + ", ".join(ns)) if ns else "cluster-wide"
+            r["scope"] = ("nodes: " + ", ".join(ns)) if ns else "entire cluster"
         else:
-            r["scope"] = "cluster-wide"
+            r["scope"] = "entire cluster"
     if VERBOSE:
         global TPLC
         if TPLC is None:
@@ -665,10 +670,12 @@ def main():
         mapped = sorted([r for r in results if r["status"] == "FAIL" and r["template"]],
                         key=lambda r: RANK.get(TPLC.get(r["template"], {}).get("risk", "medium").lower(), 2))
         unm = [r for r in results if r["status"] == "FAIL" and not r["template"]]
-        print("\n[*] FINDINGS:")
+        ctx = sh("kubectl config current-context")[1].strip() if have("kubectl") else ""
+        cname = ctx.split("/")[-1] if ctx else prov
+        print(f"\n[*] FINDINGS:\n    cluster: {cname or prov}")
         for r in mapped:
             risk = TPLC.get(r["template"], {}).get("risk", "Medium").upper()
-            sc = r.get("scope", "cluster-wide")
+            sc = r.get("scope", "entire cluster")
             print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m \033[37m({sc})\033[0m")
         print("  " + "-" * 64)
         print("[*] CIS BENCHMARK:")
