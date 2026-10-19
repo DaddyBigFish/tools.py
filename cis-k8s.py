@@ -179,6 +179,33 @@ def _install_dir():
     if TOOL_DIR not in os.environ.get("PATH", ""):
         os.environ["PATH"] = TOOL_DIR + os.pathsep + os.environ.get("PATH", "")
 
+def _download(url, dst):
+    import ssl
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(url, context=ctx) as r, open(dst, "wb") as f:
+            shutil.copyfileobj(r, f)
+        return
+    except Exception as e:
+        if "CERTIFICATE_VERIFY_FAILED" not in str(e):
+            raise
+    try:
+        import requests
+        r = requests.get(url, timeout=120, verify=True)
+        r.raise_for_status()
+        open(dst, "wb").write(r.content)
+        return
+    except Exception:
+        pass
+    print("[!] certificate verification failed (corporate proxy/TLS inspection?), retrying without verification")
+    ctx = ssl._create_unverified_context()
+    with urllib.request.urlopen(url, context=ctx) as r, open(dst, "wb") as f:
+        shutil.copyfileobj(r, f)
+
 def ensure_tools():
     _install_dir()
     if not have("kubectl") and not have("kubectl.exe"):
@@ -186,7 +213,7 @@ def ensure_tools():
         osname = "windows" if IS_WIN else "darwin" if IS_MAC else "linux"
         exe = ".exe" if IS_WIN else ""
         dst = os.path.join(TOOL_DIR, "kubectl" + exe)
-        urllib.request.urlretrieve(f"https://dl.k8s.io/release/v1.31.0/bin/{osname}/{ARCH}/kubectl{exe}", dst)
+        _download(f"https://dl.k8s.io/release/v1.31.0/bin/{osname}/{ARCH}/kubectl{exe}", dst)
         if not IS_WIN: os.chmod(dst, 0o755)
     if not have(kb_bin()) or not os.path.isdir(kb_cfg()):
         print("[*] installing kube-bench " + KBV)
@@ -194,11 +221,11 @@ def ensure_tools():
         osname = "windows" if IS_WIN else "darwin" if IS_MAC else "linux"
         if IS_WIN:
             u = f"https://github.com/aquasecurity/kube-bench/releases/download/{KBV}/kube-bench_{KBV[1:]}_windows_amd64.zip"
-            urllib.request.urlretrieve(u, "/tmp/kb.zip" if not IS_WIN else os.path.join(tempfile.gettempdir(), "kb.zip"))
+            _download(u, os.path.join(tempfile.gettempdir(), "kb.zip"))
             with zipfile.ZipFile(os.path.join(tempfile.gettempdir(), "kb.zip") if IS_WIN else "/tmp/kb.zip") as z: z.extractall(os.path.join(tempfile.gettempdir(), "kb"))
         else:
             u = f"https://github.com/aquasecurity/kube-bench/releases/download/{KBV}/kube-bench_{KBV[1:]}_{osname}_{ARCH}.tar.gz"
-            urllib.request.urlretrieve(u, "/tmp/kb.tar.gz")
+            _download(u, "/tmp/kb.tar.gz")
             with tarfile.open("/tmp/kb.tar.gz") as t: t.extractall("/tmp/kb")
             if os.path.isdir("/tmp/kb/cfg"): subprocess.run(["rm", "-rf", os.path.join(TOOL_DIR, "cfg")]), shutil.move("/tmp/kb/cfg", kb_cfg())
         src = os.path.join(tempfile.gettempdir(), "kb")
@@ -209,6 +236,60 @@ def ensure_tools():
         if IS_WIN and os.path.isdir(cfgd):
             if os.path.isdir(kb_cfg()): shutil.rmtree(kb_cfg())
             shutil.copytree(cfgd, kb_cfg())
+
+# ---------------- per-node kube-bench jobs ----------------
+JOB = """apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cis-k8s-bench-{node}
+  namespace: default
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: "{node}"
+      hostPID: true
+      containers:
+      - name: kb
+        image: aquasec/kube-bench:latest
+        command: ["kube-bench", "run", "--json", "--benchmark", "{bench}"]
+      restartPolicy: Never
+  backoffLimit: 0
+"""
+
+def per_node_bench(prov):
+    if not have("kubectl"): return []
+    nodes = [n["metadata"]["name"] for n in (jsh("kubectl get nodes -o json") or {}).get("items", [])]
+    if not nodes: return []
+    b = BENCH.get(prov) or "cis-1.12"
+    print(f"[*] per-node kube-bench ({b}) on {len(nodes)} node(s)")
+    results = []
+    for n in nodes:
+        name = re.sub(r"[^a-z0-9-]", "-", n.lower())[:50]
+        j = JOB.replace("{bench}", b).replace("{node}", name if name else n).replace('kubernetes.io/hostname: "' + name + '"', f'kubernetes.io/hostname: "{n}"')
+        import tempfile as _tf
+        with _tf.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(j); jf = f.name
+        sh("kubectl delete job cis-k8s-bench-" + name + " --ignore-not-found", 60)
+        rc, o, e = sh("kubectl apply -f " + jf, 60)
+        if rc != 0:
+            print(f"  [-] {n}: job apply failed: {e[:120]}")
+            continue
+        for _ in range(60):
+            rc, o, e = sh(f"kubectl wait --for=condition=complete --timeout=10s job/cis-k8s-bench-{name}", 15)
+            if rc == 0: break
+        rc, o, e = sh(f"kubectl logs -l job-name=cis-k8s-bench-{name}", 60)
+        try:
+            d = json.loads(o)
+            for t in d.get("Tests", []):
+                for r in t.get("results", []):
+                    results.append({"id": r.get("check_number", ""), "desc": r.get("check_desc", ""), "status": r.get("status", "WARN"), "remediation": r.get("remediation", ""), "evidence": (r.get("actual_value", "") or "")[:200], "src": "kube-bench", "node": n})
+            print(f"  [+] {n}: {len(d.get('Tests', []))} sections")
+        except Exception:
+            print(f"  [-] {n}: no results (job may still be running, check: kubectl logs -l job-name=cis-k8s-bench-{name})")
+        sh("kubectl delete job cis-k8s-bench-" + name + " --ignore-not-found", 60)
+    return results
 
 # ---------------- kube-bench ----------------
 # newest CIS benchmark config per provider (kube-bench v0.16.0)
@@ -258,7 +339,7 @@ def api_checks():
     add("5.1.2", "Secret access minimized in custom roles", not sec, "Remove get/list/watch on secrets from roles that do not require it", ",".join(sec[:5]))
 
     pods = (jsh("kubectl get pods -A -o json") or {}).get("items", [])
-    def cnt(f): return [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] for p in pods if f(p)]
+    def cnt(f): return [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] + "@" + p.get("spec", {}).get("nodeName", "?") for p in pods if f(p)]
     spec = lambda p: p.get("spec", {})
     cs = lambda p, f: any(f(c) for c in spec(p).get("containers", []))
     sec_c = lambda c: c.get("securityContext", {}) or {}
@@ -299,7 +380,7 @@ def extra_checks():
     pods = (jsh("kubectl get pods -A -o json") or {}).get("items", [])
     spec = lambda p: p.get("spec", {})
     cs = lambda p, f: any(f(c) for c in spec(p).get("containers", []))
-    def cnt(f): return [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] for p in pods if f(p)]
+    def cnt(f): return [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] + "@" + p.get("spec", {}).get("nodeName", "?") for p in pods if f(p)]
 
     dash = cnt(lambda p: "dashboard" in p["metadata"]["name"].lower() or "dashboard" in p["metadata"]["namespace"].lower())
     add("Kubernetes dashboard not deployed", not dash, "Remove the Kubernetes dashboard or restrict access", "Kubernetes Web UI (Dashboard) Enabled", ",".join(dash[:5]))
@@ -412,6 +493,9 @@ def render(results, prov, outdir):
         md.append("**Affected CIS controls:**")
         for r in rs:
             md.append(f"- `{r['id']}` {r['desc']}" + (f" â€” evidence: `{r['evidence']}`" if r.get("evidence") else ""))
+        nodeset = sorted({r["node"] for r in rs if r.get("node")} | {ev.split("@", 1)[1] for r in rs for ev in re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r.get("evidence", ""))})
+        if nodeset:
+            md.append("\n**Affected nodes:** " + ", ".join(f"`{n}`" for n in nodeset))
         md.append("\n**Details:** " + m.get("details", "").split("[^footnote")[0][:800])
         md.append("\n**Recommendation:** " + m.get("rec", ""))
         rem = {r["remediation"] for r in rs if r.get("remediation")}
@@ -433,6 +517,7 @@ def main():
     ap.add_argument("--provider", choices=["eks", "aks", "gke", "oke", "ack", "openshift", "vanilla"])
     ap.add_argument("--install", action="store_true")
     ap.add_argument("--skip-bench", action="store_true")
+    ap.add_argument("--per-node", action="store_true", help="run kube-bench as a job on every node")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("-q", "--quiet", action="store_true")
     ap.add_argument("--out", default="out")
@@ -451,6 +536,7 @@ def main():
                 ensure_tools()
         a.provider = input(f"[?] provider [{det}] (eks/aks/gke/oke/ack/openshift/vanilla): ").strip().lower() or det
         a.skip_bench = input("[?] run kube-bench node/config checks (best on a node or via job)? [Y/n]: ").strip().lower() in ("n", "no")
+        a.per_node = input("[?] per-node mode (kube-bench job on EVERY cluster node)? [y/N]: ").strip().lower() in ("y", "yes")
         VERBOSE = a.verbose = input("[?] verbose check-by-check output? [Y/n]: ").strip().lower() not in ("n", "no")
         a.out = input("[?] output directory [out]: ").strip() or "out"
     if a.install: ensure_tools()
@@ -475,6 +561,9 @@ def main():
             print(f"[+] kube-bench: {n} checks")
         else:
             print(f"[-] kube-bench skipped: {err} (node-level checks need to run on a node; API/CLI checks continue)")
+    if getattr(a, "per_node", False):
+        pn = per_node_bench(prov); print(f"[+] per-node kube-bench: {len(pn)} results across nodes")
+        results.extend(pn)
     ac = api_checks(); print(f"[+] api checks: {len(ac)}")
     cc = cli_checks(prov); print(f"[+] cli checks: {len(cc)}")
     ec = extra_checks(); print(f"[+] extra (non-CIS) checks: {len(ec)}")
