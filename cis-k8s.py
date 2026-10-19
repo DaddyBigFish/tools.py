@@ -215,7 +215,9 @@ def ensure_tools():
         dst = os.path.join(TOOL_DIR, "kubectl" + exe)
         _download(f"https://dl.k8s.io/release/v1.31.0/bin/{osname}/{ARCH}/kubectl{exe}", dst)
         if not IS_WIN: os.chmod(dst, 0o755)
-    if not have(kb_bin()) or not os.path.isdir(kb_cfg()):
+    if IS_WIN:
+        print("[*] kube-bench has no Windows build - skipped. Node-level CIS checks on Windows come from --per-node mode (in-cluster jobs), which this tool runs via kubectl")
+    elif not have(kb_bin()) or not os.path.isdir(kb_cfg()):
         print("[*] installing kube-bench " + KBV)
         import zipfile
         osname = "windows" if IS_WIN else "darwin" if IS_MAC else "linux"
@@ -304,7 +306,9 @@ COVERAGE = {"vanilla": "engine cis-1.12 == CIS Kubernetes Benchmark v2.0.1 (124/
  "ack": "engine ack-1.0 == CIS ACK Benchmark v1.0.0 (latest)",
  "openshift": "engine rh-1.9 == CIS OpenShift Benchmark v1.9.0 (latest)"}
 def run_bench(prov):
-    if not have("kube-bench") and not os.path.isfile(kb_bin()): return None, "kube-bench not installed (--install)"
+    if not have("kube-bench") and not os.path.isfile(kb_bin()):
+        msg = "kube-bench not available on Windows - use --per-node for in-cluster node checks" if IS_WIN else "kube-bench not installed (--install)"
+        return None, msg
     b = BENCH.get(prov)
     c = f'"{kb_bin()}" run --json' if os.path.sep in kb_bin() else f"{kb_bin()} run --json"
     if os.path.isdir(kb_cfg()):
