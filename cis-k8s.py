@@ -486,7 +486,11 @@ def cli_checks(prov):
     if prov == "eks" and not have("aws"):
         print("[-] eks cli checks skipped: aws CLI not found")
     if prov == "eks" and have("aws"):
-        rc, o, e = sh("aws eks list-clusters --output json")
+        ctx = sh("kubectl config current-context")[1].strip() if have("kubectl") else ""
+        rg = ""
+        if ctx.count(":") >= 3 and "eks" in ctx:
+            rg = " --region " + ctx.split(":")[3]
+        rc, o, e = sh(f"aws eks list-clusters{rg} --output json")
         cl = None
         try: cl = json.loads(o)
         except Exception: pass
@@ -496,15 +500,11 @@ def cli_checks(prov):
         elif not cl.get("clusters"):
             print("[-] eks cli checks: no clusters returned by aws eks list-clusters (region? try --region)")
         cl = cl or {}
-        ctx = sh("kubectl config current-context")[1].strip() if have("kubectl") else ""
         names = cl.get("clusters", [])
         if not names and ctx:
             cn = ctx.split("/")[-1]
             names = [cn]
             print(f"[*] eks cli checks: using cluster from kubeconfig context ({cn})")
-        rg = ""
-        if ctx.count(":") >= 3 and "eks" in ctx:
-            rg = " --region " + ctx.split(":")[3]
         for n in names:
             d = jsh(f"aws eks describe-cluster --name {n}{rg} --output json") or {}
             c = d.get("cluster", {})
