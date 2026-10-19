@@ -486,9 +486,27 @@ def cli_checks(prov):
     if prov == "eks" and not have("aws"):
         print("[-] eks cli checks skipped: aws CLI not found")
     if prov == "eks" and have("aws"):
-        cl = jsh("aws eks list-clusters --output json") or {}
-        for n in cl.get("clusters", []):
-            d = jsh(f"aws eks describe-cluster --name {n} --output json") or {}
+        rc, o, e = sh("aws eks list-clusters --output json")
+        cl = None
+        try: cl = json.loads(o)
+        except Exception: pass
+        if cl is None:
+            note_perm(e)
+            print("[-] eks cli checks skipped: aws eks list-clusters failed - " + (e.strip().splitlines() or [""])[-1][:120])
+        elif not cl.get("clusters"):
+            print("[-] eks cli checks: no clusters returned by aws eks list-clusters (region? try --region)")
+        cl = cl or {}
+        ctx = sh("kubectl config current-context")[1].strip() if have("kubectl") else ""
+        names = cl.get("clusters", [])
+        if not names and ctx:
+            cn = ctx.split("/")[-1]
+            names = [cn]
+            print(f"[*] eks cli checks: using cluster from kubeconfig context ({cn})")
+        rg = ""
+        if ctx.count(":") >= 3 and "eks" in ctx:
+            rg = " --region " + ctx.split(":")[3]
+        for n in names:
+            d = jsh(f"aws eks describe-cluster --name {n}{rg} --output json") or {}
             c = d.get("cluster", {})
             lg = c.get("logging", {}).get("clusterLogging", [{}])
             on = set(lg[0].get("types", [])) if lg and lg[0].get("enabled") else set()
@@ -566,8 +584,7 @@ def render(results, prov, outdir):
         scopes = {r.get("scope", "entire cluster") for r in rs}
         if nodeset:
             md.append("\n**Affected nodes:** " + ", ".join(f"`{n}`" for n in nodeset))
-        elif scopes == {"entire cluster"}:
-            md.append("\n**Scope:** entire cluster (control plane / admission configuration, not a specific host)")
+
         md.append("\n**Details:** " + m.get("details", "").split("[^footnote")[0][:800])
         md.append("\n**Recommendation:** " + m.get("rec", ""))
         rem = {r["remediation"] for r in rs if r.get("remediation")}
@@ -675,8 +692,9 @@ def main():
         print(f"\n[*] FINDINGS:\n    cluster: {cname or prov}")
         for r in mapped:
             risk = TPLC.get(r["template"], {}).get("risk", "Medium").upper()
-            sc = r.get("scope", "entire cluster")
-            print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m \033[37m({sc})\033[0m")
+            sc = r.get("scope", "")
+            sfx = f" \033[37m({sc})\033[0m" if sc.startswith("nodes:") or sc.startswith("node:") else ""
+            print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m{sfx}")
         print("  " + "-" * 64)
         print("[*] CIS BENCHMARK:")
         fc = [r["id"] for r in results if r["status"] == "FAIL" and r["id"] != "EXTRA"]
