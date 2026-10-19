@@ -342,7 +342,7 @@ COVERAGE = {"vanilla": "engine cis-1.12 == CIS Kubernetes Benchmark v2.0.1 (124/
  "openshift": "engine rh-1.9 == CIS OpenShift Benchmark v1.9.0 (latest)"}
 def run_bench(prov):
     if not have("kube-bench") and not os.path.isfile(kb_bin()):
-        msg = "kube-bench is not supported on this host OS; node-level checks run via --per-node in-cluster jobs instead" if IS_WIN else "kube-bench is not installed (run with --install to bootstrap)"
+        msg = "kube-bench is not supported on this host OS; node-level checks run as in-cluster jobs with --per-node" if IS_WIN else "kube-bench is not installed (run with --install to bootstrap)"
         return None, msg
     b = BENCH.get(prov)
     c = f'"{kb_bin()}" run --json' if os.path.sep in kb_bin() else f"{kb_bin()} run --json"
@@ -484,7 +484,7 @@ def cli_checks(prov):
         r = {"id": cid, "desc": desc, "status": "PASS" if ok else "FAIL", "remediation": rem, "evidence": evid, "src": "cli"}
         out.append(r); show(r)
     if prov == "eks" and not have("aws"):
-        print("[-] eks cli checks skipped: aws CLI not found")
+        print("[-] eks control-plane checks skipped: aws CLI not found")
     if prov == "eks" and have("aws"):
         ctx = sh("kubectl config current-context")[1].strip() if have("kubectl") else ""
         rg = ""
@@ -494,17 +494,20 @@ def cli_checks(prov):
         cl = None
         try: cl = json.loads(o)
         except Exception: pass
+        list_err = None
         if cl is None:
             note_perm(e)
-            print("[-] eks cli checks skipped: aws eks list-clusters failed - " + (e.strip().splitlines() or [""])[-1][:120])
+            list_err = (e.strip().splitlines() or ["unknown error"])[-1][:120]
         elif not cl.get("clusters"):
-            print("[-] eks cli checks: no clusters returned by aws eks list-clusters (region? try --region)")
+            list_err = "no clusters returned by aws eks list-clusters"
         cl = cl or {}
         names = cl.get("clusters", [])
         if not names and ctx:
             cn = ctx.split("/")[-1]
             names = [cn]
-            print(f"[*] eks cli checks: using cluster from kubeconfig context ({cn})")
+            print(f"[*] eks control-plane checks: cluster '{cn}' (from kubeconfig; list-clusters unavailable)")
+        if not names and list_err:
+            print(f"[-] eks control-plane checks skipped: {list_err}")
         for n in names:
             d = jsh(f"aws eks describe-cluster --name {n}{rg} --output json") or {}
             c = d.get("cluster", {})
@@ -636,8 +639,8 @@ def main():
             if input("[?] no kubectl/kube-bench found, install them? [Y/n]: ").strip().lower() not in ("n", "no"):
                 ensure_tools()
         a.provider = input(f"[?] provider [{det}] (eks/aks/gke/oke/ack/openshift/vanilla): ").strip().lower() or det
-        a.skip_bench = input("[?] run kube-bench node/config checks (best on a node or via job)? [Y/n]: ").strip().lower() in ("n", "no")
-        a.per_node = input("[?] per-node mode (kube-bench job on EVERY cluster node)? [y/N]: ").strip().lower() in ("y", "yes")
+        a.skip_bench = input("[?] run kube-bench node/config checks? [Y/n]: ").strip().lower() in ("n", "no")
+        a.per_node = input("[?] per-node mode (run kube-bench as a job on every node)? [y/N]: ").strip().lower() in ("y", "yes")
         VERBOSE = a.verbose = input("[?] verbose check-by-check output? [Y/n]: ").strip().lower() not in ("n", "no")
         a.out = input("[?] output directory [out]: ").strip() or "out"
     if a.install: ensure_tools()
