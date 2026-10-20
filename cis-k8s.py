@@ -7,7 +7,7 @@
 #   cis-k8s.py --provider eks      force provider
 #   cis-k8s.py --skip-bench        only API + cloud CLI checks
 #   cis-k8s.py --report out/results.json   re-render report from previous run
-import argparse, json, os, re, shutil, subprocess, sys, tarfile, tempfile, urllib.request
+import argparse, ipaddress, json, os, re, shutil, subprocess, sys, tarfile, tempfile, urllib.request
 from datetime import datetime, timezone
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -118,7 +118,7 @@ def show(r):
         if t is None:
             line = f"  {sym} {r['id']} {r['desc'][:60]}  \033[37m[UNMAPPED]\033[0m no finding template"
         else:
-            risk = TPLC.get(t, {}).get("risk", "Medium").upper()
+            risk = tget(TPLC, t).get("risk", "Medium").upper()
             col = {"HIGH": 31, "CRITICAL": 35, "MEDIUM": 33, "LOW": 36}.get(risk, 37)
             line = f"  {sym} {r['id']}  \033[{col}m[{risk}]\033[0m \033[1m{t}\033[0m"
     else:
@@ -188,6 +188,7 @@ MISSING_PERMS = []
 DENIED = set()
 PARTIAL = {}
 RAWJSON = {}
+RAWCMD = {}
 CUR_RES = None
 RAWMAX = int(os.environ.get("CISK8S_RAW_MAX", "3000"))
 RAWCFG = {}
@@ -205,8 +206,25 @@ def note_perm(err):
         return True
     return False
 
+def tget(tpl, t):
+    """template lookup: exact, then case-insensitive"""
+    if t in tpl: return tpl[t]
+    tl = (t or "").lower()
+    for k, v in tpl.items():
+        if k.lower() == tl: return v
+    return {}
+
+def ipr(c):
+    """CIDR -> plain range (0.0.0.0/0 -> 0.0.0.0-255.255.255.255, /32 -> single ip)"""
+    try:
+        n = ipaddress.ip_network(str(c), strict=False)
+        return str(n.network_address) if n.prefixlen == n.max_prefixlen else f"{n.network_address}-{n.broadcast_address}"
+    except Exception:
+        return str(c)
+
 def jsh(c, res=None):
     rc, o, e = sh(c)
+    if res: RAWCMD[res] = c
     m2 = re.search(r'cannot (?:list|get|watch|create) resources? "([^"]+)"', e or "") or re.search(r'"?(\w[\w.-]*)"? is forbidden', e or "")
     if m2:
         DENIED.add(m2.group(1))
@@ -718,7 +736,7 @@ def cli_checks(prov):
             on = set(lg[0].get("types", [])) if lg and lg[0].get("enabled") else set()
             add("2.1.1", f"[{n}] Control plane audit logging enabled", "audit" in on, "Enable 'audit' (and api/authenticator) log types", str(sorted(on)))
             ep = c.get("resourcesVpcConfig", {})
-            cidrs = ";".join("cidr:" + c for c in (ep.get("publicAccessCidrs") or []))
+            cidrs = ";".join(ipr(c) for c in (ep.get("publicAccessCidrs") or []))
             add("3.1.1", f"[{n}] API endpoint not publicly accessible", not ep.get("endpointPublicAccess"), "Disable endpointPublicAccess or restrict publicAccessCidrs", f"public={ep.get('endpointPublicAccess')};{cidrs}")
             add("4.1.1", f"[{n}] Secrets encrypted with KMS", bool(c.get("encryptionConfig")), "Associate a KMS key via encryptionConfig", str(c.get("encryptionConfig")))
             try: ve = float(c.get("version", "0"))
@@ -734,7 +752,7 @@ def cli_checks(prov):
             add("5.4.1", f"[{n}] Azure Policy add-on enabled", (c.get("azurePolicyEnabled") or (c.get("addonProfiles", {}).get("azurepolicy", {}).get("enabled"))), "Enable the Azure Policy add-on", "")
             mon = c.get("addonProfiles", {}).get("omsagent", {}).get("enabled")
             add("5.1.x", f"[{n}] Container insights / monitoring enabled", bool(mon), "Enable Container insights (omsagent)", "")
-            add("6.1.1", f"[{n}] Private cluster", bool(c.get("apiServerAccessProfile", {}).get("enablePrivateCluster")), "Enable private cluster", str(c.get("apiServerAccessProfile", {}).get("authorizedIPRanges")))
+            add("6.1.1", f"[{n}] Private cluster", bool(c.get("apiServerAccessProfile", {}).get("enablePrivateCluster")), "Enable private cluster", ";".join(ipr(x) for x in (c.get("apiServerAccessProfile", {}).get("authorizedIPRanges") or [])))
             add("5.2.2", f"[{n}] Local accounts disabled", bool(c.get("disableLocalAccounts")), "Set --disable-local-accounts", "")
             try: va = float(".".join(str(c.get("kubernetesVersion", "0")).split(".")[:2]))
             except: va = 0.0
@@ -782,8 +800,8 @@ def render(results, prov, outdir):
     if DENIED or PARTIAL:
         md.insert(4, f"_Access gaps: skipped entirely (no verdicts emitted): {', '.join(sorted(DENIED)) or 'none'} | reduced scope via per-namespace fallback: {', '.join(sorted(PARTIAL)) or 'none'}_")
     RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
-    for t, rs in sorted(by.items(), key=lambda kv: (RANK.get(tpl.get(kv[0], {}).get("risk", "medium").lower(), 2), -len(kv[1]))):
-        m = tpl.get(t, {})
+    for t, rs in sorted(by.items(), key=lambda kv: (RANK.get(tget(tpl, kv[0]).get("risk", "medium").lower(), 2), -len(kv[1]))):
+        m = tget(tpl, t)
         md.append(f"## [{m.get('risk', 'Medium').upper()}] {t}")
         md.append(f"**Risk:** {m.get('risk', 'Medium')}  |  **Category:** {m.get('cat', 'Security')}  |  **Non-compliant checks:** {len(rs)}\n")
         md.append("**Affected CIS controls:**")
@@ -924,20 +942,21 @@ def main():
         RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
         COL = {"HIGH": 31, "CRITICAL": 35, "MEDIUM": 33, "LOW": 36}
         mapped = sorted([r for r in results if r["status"] == "FAIL" and r["template"]],
-                        key=lambda r: RANK.get(TPLC.get(r["template"], {}).get("risk", "medium").lower(), 2))
+                        key=lambda r: RANK.get(tget(TPLC, r["template"]).get("risk", "medium").lower(), 2))
         unm = [r for r in results if r["status"] == "FAIL" and not r["template"]]
         ctx = sh("kubectl config current-context")[1].strip() if have("kubectl") else ""
         cname = ctx.split("/")[-1] if ctx else prov
         print(f"\n[*] FINDINGS:\n    cluster: {cname or prov}")
         for r in mapped:
-            risk = TPLC.get(r["template"], {}).get("risk", "Medium").upper()
-            sc = r.get("scope", "")
-            sfx = f" \033[37m({sc})\033[0m" if sc.startswith("nodes:") or sc.startswith("node:") else ""
-            print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m{sfx}")
-            rawc = r.get("rawcfg")
-            if rawc:
-                print("      " + rawc)
-            print_raw(r.get("res"), r.get("evidence", ""))
+            te = tget(TPLC, r["template"])
+            risk = te.get("risk", "Medium").upper()
+            note = "" if te else "  \033[37m(risk defaulted: template not in templates file)\033[0m"
+            print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m{note}")
+            cmd = RAWCMD.get(r.get("res") or "")
+            if cmd:
+                print(f"      raw output: {cmd}")
+                if (r.get("res") or "") in PARTIAL:
+                    print("        (cluster-scope denied for your identity; per-namespace: " + cmd.replace(" -A ", " --namespace <ns> ").replace("-A", "--namespace <ns>") + ")")
             ev = r.get("evidence", "")
             if ev:
                 print("      vulnerable items:")
