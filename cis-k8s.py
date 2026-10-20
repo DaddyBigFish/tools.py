@@ -379,57 +379,57 @@ def api_checks():
 
     crb = (jsh("kubectl get clusterrolebindings -o json") or {}).get("items", [])
     bad = [b["metadata"]["name"] for b in crb if any(s.get("name") in ("system:anonymous", "system:unauthenticated") for s in b.get("subjects", []))]
-    add("5.1.x", "No RBAC bindings for unauthenticated subjects", not bad, "Remove bindings granting roles to system:anonymous/system:unauthenticated", ",".join(bad[:5]))
+    add("5.1.x", "No RBAC bindings for unauthenticated subjects", not bad, "Remove bindings granting roles to system:anonymous/system:unauthenticated", ",".join(bad))
     adm = [b["metadata"]["name"] for b in crb if b.get("roleRef", {}).get("name") == "cluster-admin" and any(s.get("kind") in ("User", "Group") and not str(s.get("name", "")).startswith("system:") for s in b.get("subjects", []))]
-    add("5.1.1", "cluster-admin only used where required", not adm, "Restrict cluster-admin to break-glass admin accounts", ",".join(adm[:5]))
+    add("5.1.1", "cluster-admin only used where required", not adm, "Restrict cluster-admin to break-glass admin accounts", ",".join(adm))
 
     roles = (jsh("kubectl get clusterroles -o json") or {}).get("items", [])
     wc = [r["metadata"]["name"] for r in roles if any("*" in (ru.get("verbs") or [""]) or "*" in (ru.get("resources") or [""]) for ru in r.get("rules", [])) and not r["metadata"]["name"].startswith("system:")]
-    add("5.1.3", "No wildcards in custom Roles/ClusterRoles", not wc, "Replace * verbs/resources with explicit lists", ",".join(wc[:5]))
+    add("5.1.3", "No wildcards in custom Roles/ClusterRoles", not wc, "Replace * verbs/resources with explicit lists", ",".join(wc))
     sec = [r["metadata"]["name"] for r in roles if any("secrets" in (ru.get("resources") or []) and any(v in (ru.get("verbs") or []) for v in ("get", "list", "watch")) for ru in r.get("rules", [])) and not r["metadata"]["name"].startswith("system:")]
-    add("5.1.2", "Secret access minimized in custom roles", not sec, "Remove get/list/watch on secrets from roles that do not require it", ",".join(sec[:5]))
+    add("5.1.2", "Secret access minimized in custom roles", not sec, "Remove get/list/watch on secrets from roles that do not require it", ",".join(sec))
 
     pods = (jsh("kubectl get pods -A -o json") or {}).get("items", [])
     def cnt(f): return [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] + "@" + p.get("spec", {}).get("nodeName", "?") for p in pods if f(p)]
     spec = lambda p: p.get("spec", {})
     cs = lambda p, f: any(f(c) for c in spec(p).get("containers", []))
     sec_c = lambda c: c.get("securityContext", {}) or {}
-    add("5.2.1", "No privileged containers", not cnt(lambda p: cs(p, lambda c: sec_c(c).get("privileged"))), "Remove securityContext.privileged", ",".join(cnt(lambda p: cs(p, lambda c: sec_c(c).get("privileged")))[:5]))
+    add("5.2.1", "No privileged containers", not cnt(lambda p: cs(p, lambda c: sec_c(c).get("privileged"))), "Remove securityContext.privileged", ",".join(cnt(lambda p: cs(p, lambda c: sec_c(c).get("privileged")))))
     add("5.2.2", "No hostPID", not cnt(lambda p: spec(p).get("hostPID")), "Set hostPID: false", ",".join(cnt(lambda p: spec(p).get("hostPID"))[:5]))
     add("5.2.3", "No hostIPC", not cnt(lambda p: spec(p).get("hostIPC")), "Set hostIPC: false", ",".join(cnt(lambda p: spec(p).get("hostIPC"))[:5]))
     add("5.2.4", "No hostNetwork", not cnt(lambda p: spec(p).get("hostNetwork")), "Set hostNetwork: false", ",".join(cnt(lambda p: spec(p).get("hostNetwork"))[:5]))
     add("5.2.5", "allowPrivilegeEscalation=false everywhere", not cnt(lambda p: cs(p, lambda c: sec_c(c).get("allowPrivilegeEscalation") is not False)), "Set allowPrivilegeEscalation: false", ",".join(cnt(lambda p: cs(p, lambda c: sec_c(c).get("allowPrivilegeEscalation") is not False))[:5]))
     sens = ("/", "/etc", "/root", "/var/run/docker.sock", "/var/lib/kubelet", "/proc", "/sys")
     hp = cnt(lambda p: any(v.get("hostPath", {}).get("path", "") in sens for v in spec(p).get("volumes", []) if "hostPath" in v))
-    add("5.2.x", "No sensitive hostPath mounts", not hp, "Remove hostPath volumes for sensitive paths", ",".join(hp[:5]))
+    add("5.2.x", "No sensitive hostPath mounts", not hp, "Remove hostPath volumes for sensitive paths", ",".join(hp))
     add("5.2.x", "No containers running as UID 0", not cnt(lambda p: cs(p, lambda c: sec_c(c).get("runAsUser") == 0)), "Set runAsNonRoot: true / non-zero runAsUser", ",".join(cnt(lambda p: cs(p, lambda c: sec_c(c).get("runAsUser") == 0))[:5]))
     dn = cnt(lambda p: p["metadata"]["namespace"] == "default")
-    add("5.7.1", "default namespace not used for workloads", not dn, "Move workloads out of the default namespace", ",".join(dn[:5]))
+    add("5.7.1", "default namespace not used for workloads", not dn, "Move workloads out of the default namespace", ",".join(dn))
 
     ns = (jsh("kubectl get namespaces -o json") or {}).get("items", [])
     sys_ns = {"kube-system", "kube-public", "kube-node-lease", "default"}
     nolbl = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and not any(k.startswith("pod-security.kubernetes.io/enforce") for k in n["metadata"].get("labels", {}))]
-    add("5.2.x", "Pod Security Standards enforced on all namespaces", not nolbl, "Label namespaces pod-security.kubernetes.io/enforce=baseline|restricted", ",".join(nolbl[:5]))
+    add("5.2.x", "Pod Security Standards enforced on all namespaces", not nolbl, "Label namespaces pod-security.kubernetes.io/enforce=baseline|restricted", ",".join(nolbl))
     np = (jsh("kubectl get networkpolicies -A -o json") or {}).get("items", [])
     covered = {p["metadata"]["namespace"] for p in np}
     nonp = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in covered]
-    add("5.3.2", "All namespaces have NetworkPolicies", not nonp, "Create default-deny NetworkPolicies per namespace", ",".join(nonp[:5]))
+    add("5.3.2", "All namespaces have NetworkPolicies", not nonp, "Create default-deny NetworkPolicies per namespace", ",".join(nonp))
 
     sa = (jsh("kubectl get serviceaccounts -A -o json") or {}).get("items", [])
     am = [s["metadata"]["namespace"] + "/" + s["metadata"]["name"] for s in sa if s.get("automountServiceAccountToken") is True and s["metadata"]["name"] != "default"]
-    add("5.1.6", "automountServiceAccountToken disabled unless needed", not am, "Set automountServiceAccountToken: false", ",".join(am[:5]))
+    add("5.1.6", "automountServiceAccountToken disabled unless needed", not am, "Set automountServiceAccountToken: false", ",".join(am))
 
     rq = {(x["metadata"]["namespace"]) for x in (jsh("kubectl get resourcequotas -A -o json") or {}).get("items", [])}
     norq = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in rq]
-    add("5.4.x", "All namespaces have ResourceQuotas", not norq, "Create ResourceQuota per namespace (namespace segregation)", ",".join(norq[:5]))
+    add("5.4.x", "All namespaces have ResourceQuotas", not norq, "Create ResourceQuota per namespace (namespace segregation)", ",".join(norq))
     lr = {(x["metadata"]["namespace"]) for x in (jsh("kubectl get limitranges -A -o json") or {}).get("items", [])}
     nolr = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in lr]
-    add("5.4.x", "All namespaces have LimitRanges", not nolr, "Create LimitRange per namespace for default requests/limits", ",".join(nolr[:5]))
+    add("5.4.x", "All namespaces have LimitRanges", not nolr, "Create LimitRange per namespace for default requests/limits", ",".join(nolr))
 
     if CUR_PROV == "eks":
         noi = [s["metadata"]["namespace"] + "/" + s["metadata"]["name"] for s in sa
                if s.get("automountServiceAccountToken") is not False and "eks.amazonaws.com/role-arn" not in (s.get("annotations") or {}) and s["metadata"]["name"] != "default"]
-        add("EKS-SA", "Service accounts use IRSA instead of node instance role", not noi, "Annotate SAs with eks.amazonaws.com/role-arn (IRSA) or disable automount; node role credentials are otherwise exposed to pods", ",".join(noi[:5]))
+        add("EKS-SA", "Service accounts use IRSA instead of node instance role", not noi, "Annotate SAs with eks.amazonaws.com/role-arn (IRSA) or disable automount; node role credentials are otherwise exposed to pods", ",".join(noi))
     return out
 
 # ---------------- extra (non-CIS) template checks ----------------
@@ -463,7 +463,7 @@ def extra_checks():
     add("No mutable image tags (:latest / untagged)", not lat, "Pin images to an immutable tag or digest", "Mutable Containers", ",".join(lat[:5]))
 
     hp = cnt(lambda p: cs(p, lambda c: any(pp.get("hostPort") for pp in c.get("ports", []) or [])))
-    add("No hostPort exposures", not hp, "Remove hostPort; use Services instead", "Docker Container Ports Open", ",".join(hp[:5]))
+    add("No hostPort exposures", not hp, "Remove hostPort; use Services instead", "Docker Container Ports Open", ",".join(hp))
 
     noss = cnt(lambda p: not (spec(p).get("securityContext", {}) or {}).get("seccompProfile") and not cs(p, lambda c: (c.get("securityContext", {}) or {}).get("seccompProfile")))
     add("seccomp profiles set on all pods", not noss, "Set securityContext.seccompProfile (RuntimeDefault minimum)", "AppArmor/SELinux Profiles Not Set on Containers", ",".join(noss[:5]))
@@ -698,6 +698,11 @@ def main():
             sc = r.get("scope", "")
             sfx = f" \033[37m({sc})\033[0m" if sc.startswith("nodes:") or sc.startswith("node:") else ""
             print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m{sfx}")
+            ev = r.get("evidence", "")
+            if ev:
+                for part in ev.split(","):
+                    part = part.strip()
+                    if part: print(f"        - {part}")
         print("  " + "-" * 64)
         print("[*] CIS BENCHMARK:")
         fc = [r["id"] for r in results if r["status"] == "FAIL" and r["id"] != "EXTRA"]
