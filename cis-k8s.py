@@ -33,7 +33,7 @@ MAP = [
  (r"runasnonroot|run as non root|runasuser.*0|root user|uid 0|running as.*root", "Container Running With root Privileges"),
  (r"net_raw|capabilities", "Container Hardening Not Performed"),
  (r"seccomp|apparmor|selinux", "AppArmor/SELinux Profiles Not Set on Containers"),
- (r"pod security polic|pod security standard|podsecurity", "Kubernetes Pod Security Policy not in use"),
+ (r"pod security polic|pod security standard|podsecurity", "Kubernetes - Pod Security Standards Not Enforced"),
  (r"networkpolic|network polic", "Kubernetes Unrestricted Cluster Network"),
  (r"secrets.*encrypt|encrypt.*secret|encryptionconfig|encryption provider", "Etcd Encryption not Configured"),
  (r"audit.*log|audit policy|audit-log", "Kubernetes Auditing Not Configured"),
@@ -133,6 +133,7 @@ def sh(c, t=60):
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
 MISSING_PERMS = []
+DENIED = set()
 RAWCFG = {}
 def note_perm(err):
     m = re.search(r'cannot (list|get|watch|create|delete|update|patch) resources? "([^"]+)"(?: in API group "([^"]*)")?', err or "")
@@ -381,7 +382,9 @@ def run_bench(prov):
     return json.loads(o), None
 
 # ---------------- built-in API checks (kubectl, provider-agnostic) ----------------
+KVER = None
 def api_checks():
+    global KVER, DENIED
     out = []
     if not have("kubectl") and not have("kubectl.exe"):
         print("[-] kubectl not found - run: python3 cis-k8s.py --install")
@@ -389,6 +392,12 @@ def api_checks():
     if sh("kubectl version --client")[0] != 0:
         print("[-] kubectl present but broken")
         return out
+    rc, o, e = sh("kubectl version -o json 2>/dev/null")
+    try:
+        KVER = json.loads(o)["serverVersion"]["gitVersion"]
+        print(f"[*] cluster Kubernetes version: {KVER}")
+    except Exception:
+        KVER = None
     rc, o, e = sh("kubectl get nodes --request-timeout=10s")
     if rc != 0:
         if note_perm(e):
@@ -401,19 +410,19 @@ def api_checks():
         r = {"id": cid, "desc": desc, "status": "PASS" if ok else "FAIL", "remediation": rem, "evidence": evid, "src": "api"}
         out.append(r); show(r)
 
-    crb = (jsh("kubectl get clusterrolebindings -o json") or {}).get("items", [])
+    crb = (jsh("kubectl get clusterrolebindings -o json") or (DENIED.add("clusterrolebindings") if "clusterrolebindings" not in DENIED else None) or {}).get("items", [])
     bad = [b["metadata"]["name"] for b in crb if any(s.get("name") in ("system:anonymous", "system:unauthenticated") for s in b.get("subjects", []))]
     add("5.1.x", "No RBAC bindings for unauthenticated subjects", not bad, "Remove bindings granting roles to system:anonymous/system:unauthenticated", ",".join(bad))
     adm = [b["metadata"]["name"] for b in crb if b.get("roleRef", {}).get("name") == "cluster-admin" and any(s.get("kind") in ("User", "Group") and not str(s.get("name", "")).startswith("system:") for s in b.get("subjects", []))]
     add("5.1.1", "cluster-admin only used where required", not adm, "Restrict cluster-admin to break-glass admin accounts", ",".join(adm))
 
-    roles = (jsh("kubectl get clusterroles -o json") or {}).get("items", [])
+    roles = (jsh("kubectl get clusterroles -o json") or (DENIED.add("clusterroles") if "clusterroles" not in DENIED else None) or {}).get("items", [])
     wc = [r["metadata"]["name"] for r in roles if any("*" in (ru.get("verbs") or [""]) or "*" in (ru.get("resources") or [""]) for ru in r.get("rules", [])) and not r["metadata"]["name"].startswith("system:")]
     add("5.1.3", "No wildcards in custom Roles/ClusterRoles", not wc, "Replace * verbs/resources with explicit lists", ",".join(wc))
     sec = [r["metadata"]["name"] for r in roles if any("secrets" in (ru.get("resources") or []) and any(v in (ru.get("verbs") or []) for v in ("get", "list", "watch")) for ru in r.get("rules", [])) and not r["metadata"]["name"].startswith("system:")]
     add("5.1.2", "Secret access minimized in custom roles", not sec, "Remove get/list/watch on secrets from roles that do not require it", ",".join(sec))
 
-    pods = (jsh("kubectl get pods -A -o json") or {}).get("items", [])
+    pods = (jsh("kubectl get pods -A -o json") or (DENIED.add("pods") if "pods" not in DENIED else None) or {}).get("items", [])
     def cnt(f): return [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] + "@" + p.get("spec", {}).get("nodeName", "?") for p in pods if f(p)]
     spec = lambda p: p.get("spec", {})
     cs = lambda p, f: any(f(c) for c in spec(p).get("containers", []))
@@ -430,7 +439,7 @@ def api_checks():
     dn = cnt(lambda p: p["metadata"]["namespace"] == "default")
     add("5.7.1", "default namespace not used for workloads", not dn, "Move workloads out of the default namespace", ",".join(dn))
 
-    ns = (jsh("kubectl get namespaces -o json") or {}).get("items", [])
+    ns = (jsh("kubectl get namespaces -o json") or (DENIED.add("namespaces") if "namespaces" not in DENIED else None) or {}).get("items", [])
     sys_ns = {"kube-system", "kube-public", "kube-node-lease", "default"}
     nolbl = []
     RAWCFG.setdefault("5.2.x", "kubectl get ns <name> -o json -> metadata.labels: " + json.dumps((ns[0]["metadata"].get("labels") if ns and not any(k.startswith("pod-security.kubernetes.io/enforce") for k in (ns[0]["metadata"].get("labels") or {})) else {}) if ns else {}))
@@ -441,24 +450,27 @@ def api_checks():
         if not any(k.startswith("pod-security.kubernetes.io/enforce") for k in lbls):
             nolbl.append(f"{nm} (no pod-security enforce label)")
     add("5.2.x", "Pod Security Standards enforced on all namespaces", not nolbl, "Label namespaces pod-security.kubernetes.io/enforce=baseline|restricted", ",".join(nolbl))
-    np = (jsh("kubectl get networkpolicies -A -o json") or {}).get("items", [])
-    if not np:
-        RAWCFG['5.3.2'] = 'kubectl get networkpolicies -A -o json -> {"items": []}'
-    covered = {p["metadata"]["namespace"] for p in np}
-    nonp = [n["metadata"]["name"] + " (0 NetworkPolicies)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in covered]
-    add("5.3.2", "All namespaces have NetworkPolicies", not nonp, "Create default-deny NetworkPolicies per namespace", ",".join(nonp))
+    if "networkpolicies" in DENIED:
+        print("[-] 5.3.2 skipped: cannot list networkpolicies (denied, recorded in permissions) - not treated as a finding")
+    else:
+        np = (jsh("kubectl get networkpolicies -A -o json") or {}).get("items", [])
+        if not np:
+            RAWCFG['5.3.2'] = 'kubectl get networkpolicies -A -o json -> {"items": []}'
+        covered = {p["metadata"]["namespace"] for p in np}
+        nonp = [n["metadata"]["name"] + " (0 NetworkPolicies)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in covered]
+        add("5.3.2", "All namespaces have NetworkPolicies", not nonp, "Create default-deny NetworkPolicies per namespace", ",".join(nonp))
 
-    sa = (jsh("kubectl get serviceaccounts -A -o json") or {}).get("items", [])
+    sa = (jsh("kubectl get serviceaccounts -A -o json") or (DENIED.add("serviceaccounts") if "serviceaccounts" not in DENIED else None) or {}).get("items", [])
     am = [s["metadata"]["namespace"] + "/" + s["metadata"]["name"] for s in sa if s.get("automountServiceAccountToken") is True and s["metadata"]["name"] != "default"]
     add("5.1.6", "automountServiceAccountToken disabled unless needed", not am, "Set automountServiceAccountToken: false", ",".join(am))
 
-    rq_all = (jsh("kubectl get resourcequotas -A -o json") or {}).get("items", [])
+    rq_all = (jsh("kubectl get resourcequotas -A -o json") or (DENIED.add("resourcequotas") if "resourcequotas" not in DENIED else None) or {}).get("items", [])
     rq = {(x["metadata"]["namespace"]) for x in rq_all}
     if not rq_all:
         RAWCFG['5.4.x-quota'] = 'kubectl get resourcequotas -A -o json -> {"items": []}'
     norq = [n["metadata"]["name"] + " (0 ResourceQuotas)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in rq]
     add("5.4.x", "All namespaces have ResourceQuotas", not norq, "Create ResourceQuota per namespace (namespace segregation)", ",".join(norq))
-    lr = {(x["metadata"]["namespace"]) for x in (jsh("kubectl get limitranges -A -o json") or {}).get("items", [])}
+    lr = {(x["metadata"]["namespace"]) for x in (jsh("kubectl get limitranges -A -o json") or (DENIED.add("limitranges") if "limitranges" not in DENIED else None) or {}).get("items", [])}
     nolr = [n["metadata"]["name"] + " (0 LimitRanges)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in lr]
     add("5.4.x", "All namespaces have LimitRanges", not nolr, "Create LimitRange per namespace for default requests/limits", ",".join(nolr))
 
@@ -476,7 +488,7 @@ def extra_checks():
     def add(desc, ok, rem, tpl, evid=""):
         r = {"id": "EXTRA", "desc": desc, "status": "PASS" if ok else "FAIL", "remediation": rem, "evidence": evid, "src": "extra", "template": tpl if not ok else None}
         out.append(r); show(r)
-    pods = (jsh("kubectl get pods -A -o json") or {}).get("items", [])
+    pods = (jsh("kubectl get pods -A -o json") or (DENIED.add("pods") if "pods" not in DENIED else None) or {}).get("items", [])
     spec = lambda p: p.get("spec", {})
     cs = lambda p, f: any(f(c) for c in spec(p).get("containers", []))
     def cnt(f): return [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] + "@" + p.get("spec", {}).get("nodeName", "?") for p in pods if f(p)]
@@ -773,6 +785,8 @@ def main():
     print(f"[+] {render(results, prov, a.out)}")
     fails = sum(1 for r in results if r["status"] == "FAIL")
     xf = sum(1 for r in results if r["status"] == "FAIL" and r.get("src") == "extra")
+    if DENIED:
+        print("[!] checks skipped due to missing permissions (NOT findings, re-run after grants): " + ", ".join(sorted(DENIED)))
     if MISSING_PERMS:
         print("\n[!] PERMISSIONS REQUIRED (share with the AWS / platform team):")
         for p in sorted(set(MISSING_PERMS)):
