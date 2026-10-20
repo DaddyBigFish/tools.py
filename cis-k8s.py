@@ -455,7 +455,7 @@ def api_checks():
         if nm in sys_ns: continue
         lbls = n["metadata"].get("labels", {}) or {}
         if not any(k.startswith("pod-security.kubernetes.io/enforce") for k in lbls):
-            nolbl.append(f"{nm} (no pod-security enforce label)")
+            nolbl.append(nm)
     add("5.2.x", "Pod Security Standards enforced on all namespaces", not nolbl, "Label namespaces pod-security.kubernetes.io/enforce=baseline|restricted", ",".join(nolbl))
     if "networkpolicies" in DENIED:
         print("[-] 5.3.2 skipped: cannot list networkpolicies (denied, recorded in permissions) - not treated as a finding")
@@ -464,7 +464,7 @@ def api_checks():
         if not np:
             RAWCFG['5.3.2'] = 'kubectl get networkpolicies -A -o json -> {"items": []}'
         covered = {p["metadata"]["namespace"] for p in np}
-        nonp = [n["metadata"]["name"] + " (0 NetworkPolicies)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in covered]
+        nonp = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in covered]
         add("5.3.2", "All namespaces have NetworkPolicies", not nonp, "Create default-deny NetworkPolicies per namespace", ",".join(nonp))
 
     sa = (jsh("kubectl get serviceaccounts -A -o json") or (DENIED.add("serviceaccounts") if "serviceaccounts" not in DENIED else None) or {}).get("items", [])
@@ -475,10 +475,10 @@ def api_checks():
     rq = {(x["metadata"]["namespace"]) for x in rq_all}
     if not rq_all:
         RAWCFG['5.4.x-quota'] = 'kubectl get resourcequotas -A -o json -> {"items": []}'
-    norq = [n["metadata"]["name"] + " (0 ResourceQuotas)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in rq]
+    norq = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in rq]
     add("5.4.x", "All namespaces have ResourceQuotas", not norq, "Create ResourceQuota per namespace (namespace segregation)", ",".join(norq))
     lr = {(x["metadata"]["namespace"]) for x in (jsh("kubectl get limitranges -A -o json") or (DENIED.add("limitranges") if "limitranges" not in DENIED else None) or {}).get("items", [])}
-    nolr = [n["metadata"]["name"] + " (0 LimitRanges)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in lr]
+    nolr = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in lr]
     add("5.4.x", "All namespaces have LimitRanges", not nolr, "Create LimitRange per namespace for default requests/limits", ",".join(nolr))
 
     if CUR_PROV == "eks":
@@ -748,6 +748,8 @@ def main():
     results += ac + cc + ec
     for r in results:
         r["template"] = r.get("template") or to_tpl(r["id"], r["desc"], prov)
+        rc_ = RAWCFG.get(r["id"]) or RAWCFG.get(r["id"] + "-quota")
+        if rc_: r["rawcfg"] = rc_
         if r.get("node"):
             r["scope"] = "node: " + r["node"]
         elif re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r.get("evidence", "")):
@@ -772,6 +774,9 @@ def main():
             sc = r.get("scope", "")
             sfx = f" \033[37m({sc})\033[0m" if sc.startswith("nodes:") or sc.startswith("node:") else ""
             print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m{sfx}")
+            rawc = r.get("rawcfg")
+            if rawc:
+                print("      " + rawc)
             ev = r.get("evidence", "")
             if ev:
                 parts = []
