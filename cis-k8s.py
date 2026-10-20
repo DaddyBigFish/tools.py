@@ -233,7 +233,10 @@ def ensure_tools():
         _download(f"https://dl.k8s.io/release/v1.31.0/bin/{osname}/{ARCH}/kubectl{exe}", dst)
         if not IS_WIN: os.chmod(dst, 0o755)
     if IS_WIN:
-        print("[*] kube-bench has no Windows build - skipped. Node-level CIS checks on Windows come from --per-node mode (in-cluster jobs), which this tool runs via kubectl")
+        if have("docker"):
+            print("[*] Docker found - kube-bench will run as a container (aquasec/kube-bench), no Windows binary needed")
+        else:
+            print("[*] no Windows kube-bench build and Docker not found - node checks will use --per-node in-cluster jobs instead")
     elif not have(kb_bin()) or not os.path.isdir(kb_cfg()):
         print("[*] installing kube-bench " + KBV)
         import zipfile
@@ -340,16 +343,25 @@ COVERAGE = {"vanilla": "engine cis-1.12 == CIS Kubernetes Benchmark v2.0.1 (124/
  "oke": "engine cis-1.12 (no OKE-specific config; node-level coverage)",
  "ack": "engine ack-1.0 == CIS ACK Benchmark v1.0.0 (latest)",
  "openshift": "engine rh-1.9 == CIS OpenShift Benchmark v1.9.0 (latest)"}
+def docker_bench_cmd(b):
+    cfg = kb_cfg()
+    mounts = f'-v "{cfg}:/etc/kube-bench/cfg"' if os.path.isdir(cfg) else ""
+    return f'docker run --rm --pid=host {mounts} aquasec/kube-bench:latest run --json --benchmark {b}'
+
 def run_bench(prov):
-    if not have("kube-bench") and not os.path.isfile(kb_bin()):
-        msg = "kube-bench is not supported on this host OS; node-level checks run as in-cluster jobs with --per-node" if IS_WIN else "kube-bench is not installed (run with --install to bootstrap)"
-        return None, msg
     b = BENCH.get(prov)
-    c = f'"{kb_bin()}" run --json' if os.path.sep in kb_bin() else f"{kb_bin()} run --json"
-    if os.path.isdir(kb_cfg()):
-        c += f' --config-dir "{kb_cfg()}"'
-    if b:
+    if have("docker"):
+        c = docker_bench_cmd(b)
+    elif have("kube-bench") or os.path.isfile(kb_bin()):
+        c = f'"{kb_bin()}" run --json' if os.path.sep in kb_bin() else f"{kb_bin()} run --json"
+        if os.path.isdir(kb_cfg()):
+            c += f' --config-dir "{kb_cfg()}"'
+    else:
+        msg = "kube-bench needs Docker or the kube-bench binary (or use --per-node in-cluster jobs)" if IS_WIN else "kube-bench not installed (run --install or install Docker)"
+        return None, msg
+    if b and "--benchmark" not in c:
         c += f" --benchmark {b}"
+    if b:
         print(f"[*] benchmark: {CISDOC.get(b, b)}")
     rc, o, e = sh(c, 300)
     if rc not in (0, 1) or not o.strip().startswith("{"):
@@ -408,11 +420,18 @@ def api_checks():
 
     ns = (jsh("kubectl get namespaces -o json") or {}).get("items", [])
     sys_ns = {"kube-system", "kube-public", "kube-node-lease", "default"}
-    nolbl = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and not any(k.startswith("pod-security.kubernetes.io/enforce") for k in n["metadata"].get("labels", {}))]
+    nolbl = []
+    for n in ns:
+        nm = n["metadata"]["name"]
+        if nm in sys_ns: continue
+        lbls = n["metadata"].get("labels", {}) or {}
+        if not any(k.startswith("pod-security.kubernetes.io/enforce") for k in lbls):
+            shown = "no labels" if not lbls else "labels=" + ";".join(f"{k}={v}" for k, v in list(lbls.items())[:3])
+            nolbl.append(f"{nm} (enforce label absent; {shown})")
     add("5.2.x", "Pod Security Standards enforced on all namespaces", not nolbl, "Label namespaces pod-security.kubernetes.io/enforce=baseline|restricted", ",".join(nolbl))
     np = (jsh("kubectl get networkpolicies -A -o json") or {}).get("items", [])
     covered = {p["metadata"]["namespace"] for p in np}
-    nonp = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in covered]
+    nonp = [n["metadata"]["name"] + " (0 NetworkPolicies)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in covered]
     add("5.3.2", "All namespaces have NetworkPolicies", not nonp, "Create default-deny NetworkPolicies per namespace", ",".join(nonp))
 
     sa = (jsh("kubectl get serviceaccounts -A -o json") or {}).get("items", [])
@@ -420,10 +439,10 @@ def api_checks():
     add("5.1.6", "automountServiceAccountToken disabled unless needed", not am, "Set automountServiceAccountToken: false", ",".join(am))
 
     rq = {(x["metadata"]["namespace"]) for x in (jsh("kubectl get resourcequotas -A -o json") or {}).get("items", [])}
-    norq = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in rq]
+    norq = [n["metadata"]["name"] + " (0 ResourceQuotas)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in rq]
     add("5.4.x", "All namespaces have ResourceQuotas", not norq, "Create ResourceQuota per namespace (namespace segregation)", ",".join(norq))
     lr = {(x["metadata"]["namespace"]) for x in (jsh("kubectl get limitranges -A -o json") or {}).get("items", [])}
-    nolr = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in lr]
+    nolr = [n["metadata"]["name"] + " (0 LimitRanges)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in lr]
     add("5.4.x", "All namespaces have LimitRanges", not nolr, "Create LimitRange per namespace for default requests/limits", ",".join(nolr))
 
     if CUR_PROV == "eks":
