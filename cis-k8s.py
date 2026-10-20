@@ -234,9 +234,14 @@ def ensure_tools():
         if not IS_WIN: os.chmod(dst, 0o755)
     if IS_WIN:
         if have("docker"):
-            print("[*] Docker found - kube-bench will run as a container (aquasec/kube-bench), no Windows binary needed")
+            print("[*] Docker found - kube-bench will run as a container (aquasec/kube-bench)")
         else:
-            print("[*] no Windows kube-bench build and Docker not found - node checks will use --per-node in-cluster jobs instead")
+            print("[*] installing Docker Desktop via winget (for kube-bench container)...")
+            rc, o, e = sh("winget install -e --id Docker.DockerDesktop --accept-source-agreements --accept-package-agreements", 900)
+            if rc == 0 or "already installed" in (o + e).lower():
+                print("[+] Docker Desktop installed - start it once, then rerun; kube-bench will use it")
+            else:
+                print(f"[-] Docker install failed ({e.strip()[:100]}) - install Docker Desktop manually or use --per-node jobs")
     elif not have(kb_bin()) or not os.path.isdir(kb_cfg()):
         print("[*] installing kube-bench " + KBV)
         import zipfile
@@ -604,12 +609,11 @@ def render(results, prov, outdir):
         for r in rs:
             ev = r.get("evidence", "")
             parts = [p.strip() for p in ev.split(",") if p.strip()]
-            if len(parts) > 12 and not any("@" in p or "=" in p for p in parts):
-                miss = {"5.2.x": "pod-security enforce label", "5.3.2": "NetworkPolicy", "5.4.x": "quota/limitrange"}.get(r["id"], "configuration")
-                evs = f"missing {miss} in {len(parts)} namespaces: " + ", ".join(parts[:10]) + f" â€¦ (+{len(parts) - 10})"
-            else:
-                evs = ev
-            md.append(f"- `{r['id']}` {r['desc']}" + (f" â€” evidence: `{evs}`" if evs else ""))
+            evs = ev
+            md.append(f"- `{r['id']}` {r['desc']}")
+            if evs:
+                for part in [p.strip() for p in evs.split(",") if p.strip()]:
+                    md.append(f"  - `{part}`")
         nodeset = sorted({r["node"] for r in rs if r.get("node")} | {ev.split("@", 1)[1] for r in rs for ev in re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r.get("evidence", ""))})
         scopes = {r.get("scope", "entire cluster") for r in rs}
         if nodeset:
@@ -728,13 +732,8 @@ def main():
             ev = r.get("evidence", "")
             if ev:
                 parts = [p.strip() for p in ev.split(",") if p.strip()]
-                is_ns_wall = len(parts) > 12 and not any("@" in p or "=" in p for p in parts)
-                if is_ns_wall:
-                    miss = {"5.2.x": "pod-security enforce label", "5.3.2": "NetworkPolicy", "5.4.x": "quota/limitrange"}.get(r["id"], "configuration")
-                    print(f"        - missing {miss} in {len(parts)} namespaces, e.g.: " + ", ".join(parts[:8]) + f" â€¦ and {len(parts) - 8} more")
-                else:
-                    for part in parts:
-                        print(f"        - {part}")
+                for part in parts:
+                    print(f"        - {part}")
         print("  " + "-" * 64)
         print("[*] CIS BENCHMARK:")
         fc = [r["id"] for r in results if r["status"] == "FAIL" and r["id"] != "EXTRA"]
