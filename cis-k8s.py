@@ -158,6 +158,10 @@ def note_perm(err):
 
 def jsh(c):
     rc, o, e = sh(c)
+    m2 = re.search(r'cannot list resources? "([^"]+)"', e or "")
+    if m2:
+        DENIED.add(m2.group(1))
+        return None
     try: return json.loads(o)
     except:
         if rc != 0: note_perm(e)
@@ -391,26 +395,34 @@ def run_bench(prov):
 # ---------------- built-in API checks (kubectl, provider-agnostic) ----------------
 KVER = None
 def per_ns(cmd, res):
-    """iterate namespaces when -A is denied; returns combined items list, or None if any ns denies it"""
+    """iterate namespaces with --namespace; returns combined items, None if denied everywhere"""
     if not NSLIST: return []
     out = []
+    denied = []
     for n in NSLIST:
-        rc, o, e = sh(cmd.replace("-A", f"-n {n}"))
+        ncmd = cmd.replace(" -A ", f" --namespace {n} ").replace("-A", f"--namespace {n}")
+        rc, o, e = sh(ncmd)
         if rc != 0:
             if "cannot list" in (e or "") or "Forbidden" in (e or ""):
-                DENIED.add(res)
-                return None
+                denied.append(n)
+                continue
             continue
         try:
-            out.extend(json.loads(o).get("items", []))
+            items = json.loads(o).get("items", [])
+            out.extend(items)
         except Exception:
             pass
+    if denied and len(denied) == len(NSLIST):
+        DENIED.add(res)
+        return None
+    if denied:
+        print(f"    (no access in {len(denied)} namespace(s): " + ", ".join(denied[:6]) + (", ..." if len(denied) > 6 else "") + ")")
     return out
 
 NSLIST = []
 
 def api_checks():
-    global KVER, DENIED
+    global KVER, DENIED, NSLIST
     out = []
     if not have("kubectl") and not have("kubectl.exe"):
         print("[-] kubectl not found - run: python3 cis-k8s.py --install")
@@ -448,7 +460,15 @@ def api_checks():
     sec = [r["metadata"]["name"] for r in roles if any("secrets" in (ru.get("resources") or []) and any(v in (ru.get("verbs") or []) for v in ("get", "list", "watch")) for ru in r.get("rules", [])) and not r["metadata"]["name"].startswith("system:")]
     add("5.1.2", "Secret access minimized in custom roles", not sec, "Remove get/list/watch on secrets from roles that do not require it", ",".join(sec))
 
-    pods = ((jsh("kubectl get pods -A -o json") or ({"items": per_ns("kubectl get pods -A -o json", "pods")} if per_ns("kubectl get pods -A -o json", "pods") is not None else None)) or (DENIED.add("pods") if "pods" not in DENIED else None) or {}).get("items", [])
+    pods = (jsh("kubectl get pods -A -o json") or {}).get("items", None)
+    if pods is None:
+        if NSLIST:
+            print(f"[*] pods: cluster scope denied, checking {len(NSLIST)} namespaces with --namespace")
+            items = per_ns("kubectl get pods -A -o json", "pods")
+            pods = items if items is not None else []
+        else:
+            DENIED.add("pods")
+            pods = []
     def cnt(f): return [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] + "@" + p.get("spec", {}).get("nodeName", "?") for p in pods if f(p)]
     spec = lambda p: p.get("spec", {})
     cs = lambda p, f: any(f(c) for c in spec(p).get("containers", []))
@@ -465,16 +485,22 @@ def api_checks():
     dn = cnt(lambda p: p["metadata"]["namespace"] == "default")
     add("5.7.1", "default namespace not used for workloads", not dn, "Move workloads out of the default namespace", ",".join(dn))
 
-    ns = (jsh("kubectl get namespaces -o json") or (DENIED.add("namespaces") if "namespaces" not in DENIED else None) or {}).get("items", [])
-    global NSLIST
-    NSLIST = [n["metadata"]["name"] for n in ns] if ns else []
-    # fallback: per-namespace listing when cluster-scope -A is denied
-    if "namespaces" in DENIED and not ns:
+    # enumerate valid namespaces first (cluster list, else derive from kubeconfig contexts)
+    ns = []
+    nsr = jsh("kubectl get namespaces -o json")
+    if nsr is None:
+        DENIED.add("namespaces")
+    else:
+        ns = nsr.get("items", [])
+    if not ns:
         ctxns = jsh("kubectl config view -o json")
         for c in (ctxns or {}).get("contexts", []):
             nn = c.get("context", {}).get("namespace")
             if nn: ns.append({"metadata": {"name": nn, "labels": {}}})
-        if ns: print("[*] namespaces derived from kubeconfig contexts (cluster list denied)")
+        if ns: print("[*] namespaces from kubeconfig contexts (cluster-wide list denied)")
+    NSLIST = [n["metadata"]["name"] for n in ns] if ns else []
+    if NSLIST:
+        print(f"[*] checking {len(NSLIST)} namespace(s) individually: " + ", ".join(NSLIST[:10]) + (" ..." if len(NSLIST) > 10 else ""))
     sys_ns = {"kube-system", "kube-public", "kube-node-lease", "default"}
     nolbl = []
     _psan = next((n for n in ns if n["metadata"]["name"] not in sys_ns and not any(k.startswith("pod-security.kubernetes.io/enforce") for k in (n["metadata"].get("labels") or {}))), None)
@@ -510,13 +536,30 @@ def api_checks():
     am = [s["metadata"]["namespace"] + "/" + s["metadata"]["name"] for s in sa if s.get("automountServiceAccountToken") is True and s["metadata"]["name"] != "default"]
     add("5.1.6", "automountServiceAccountToken disabled unless needed", not am, "Set automountServiceAccountToken: false", ",".join(am))
 
-    rq_all = ((jsh("kubectl get resourcequotas -A -o json") or ({"items": per_ns("kubectl get resourcequotas -A -o json", "resourcequotas")} if per_ns("kubectl get resourcequotas -A -o json", "resourcequotas") is not None else None)) or (DENIED.add("resourcequotas") if "resourcequotas" not in DENIED else None) or {}).get("items", [])
+    rq_all = (jsh("kubectl get resourcequotas -A -o json") or {}).get("items", None)
+    if rq_all is None:
+        if NSLIST:
+            print(f"[*] resourcequotas: cluster scope denied, checking {len(NSLIST)} namespaces with --namespace")
+            items = per_ns("kubectl get resourcequotas -A -o json", "resourcequotas")
+            rq_all = items if items is not None else []
+        else:
+            DENIED.add("resourcequotas")
+            rq_all = []
     rq = {(x["metadata"]["namespace"]) for x in rq_all}
     if not rq_all:
         RAWCFG['5.4.x-quota'] = 'kubectl get resourcequotas -A -o json -> {"items": []}'
     norq = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in rq]
     add("5.4.x", "All namespaces have ResourceQuotas", not norq, "Create ResourceQuota per namespace (namespace segregation)", ",".join(norq))
-    lr = {(x["metadata"]["namespace"]) for x in ((jsh("kubectl get limitranges -A -o json") or ({"items": per_ns("kubectl get limitranges -A -o json", "limitranges")} if per_ns("kubectl get limitranges -A -o json", "limitranges") is not None else None)) or (DENIED.add("limitranges") if "limitranges" not in DENIED else None) or {}).get("items", [])}
+    lr_all = (jsh("kubectl get limitranges -A -o json") or {}).get("items", None)
+    if lr_all is None:
+        if NSLIST:
+            print(f"[*] limitranges: cluster scope denied, checking {len(NSLIST)} namespaces with --namespace")
+            items = per_ns("kubectl get limitranges -A -o json", "limitranges")
+            lr_all = items if items is not None else []
+        else:
+            DENIED.add("limitranges")
+            lr_all = []
+    lr = {(x["metadata"]["namespace"]) for x in lr_all}
     nolr = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in lr]
     add("5.4.x", "All namespaces have LimitRanges", not nolr, "Create LimitRange per namespace for default requests/limits", ",".join(nolr))
 
@@ -534,7 +577,14 @@ def extra_checks():
     def add(desc, ok, rem, tpl, evid=""):
         r = {"id": "EXTRA", "desc": desc, "status": "PASS" if ok else "FAIL", "remediation": rem, "evidence": evid, "src": "extra", "template": tpl if not ok else None}
         out.append(r); show(r)
-    pods = (jsh("kubectl get pods -A -o json") or (DENIED.add("pods") if "pods" not in DENIED else None) or {}).get("items", [])
+    pods = (jsh("kubectl get pods -A -o json") or {}).get("items", None)
+    if pods is None:
+        if NSLIST:
+            items = per_ns("kubectl get pods -A -o json", "pods")
+            pods = items if items is not None else []
+        else:
+            DENIED.add("pods")
+            pods = []
     spec = lambda p: p.get("spec", {})
     cs = lambda p, f: any(f(c) for c in spec(p).get("containers", []))
     def cnt(f): return [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] + "@" + p.get("spec", {}).get("nodeName", "?") for p in pods if f(p)]
