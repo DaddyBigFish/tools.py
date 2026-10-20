@@ -446,35 +446,35 @@ def extra_checks():
     def cnt(f): return [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] + "@" + p.get("spec", {}).get("nodeName", "?") for p in pods if f(p)]
 
     dash = cnt(lambda p: "dashboard" in p["metadata"]["name"].lower() or "dashboard" in p["metadata"]["namespace"].lower())
-    add("Kubernetes dashboard not deployed", not dash, "Remove the Kubernetes dashboard or restrict access", "Kubernetes Web UI (Dashboard) Enabled", ",".join(dash[:5]))
+    add("Kubernetes dashboard not deployed", not dash, "Remove the Kubernetes dashboard or restrict access", "Kubernetes Web UI (Dashboard) Enabled", ",".join(dash))
 
     nolim = cnt(lambda p: cs(p, lambda c: not (c.get("resources", {}).get("limits", {}).get("memory") and c.get("resources", {}).get("limits", {}).get("cpu"))))
-    add("All containers have CPU/memory limits", not nolim, "Set resources.limits on every container", "Container Resource Limits Not in Place", ",".join(nolim[:5]))
+    add("All containers have CPU/memory limits", not nolim, "Set resources.limits on every container", "Container Resource Limits Not in Place", ",".join(nolim))
 
     bare = cnt(lambda p: not p["metadata"].get("ownerReferences"))
-    add("No bare pods (all pods owned by a workload controller)", not bare, "Use Deployments/StatefulSets/Jobs instead of bare pods", "Pods Without Parental Workload", ",".join(bare[:5]))
+    add("No bare pods (all pods owned by a workload controller)", not bare, "Use Deployments/StatefulSets/Jobs instead of bare pods", "Pods Without Parental Workload", ",".join(bare))
 
     imgs = [(c.get("image", "") or "") for p in pods for c in spec(p).get("containers", [])]
     pub = sorted({i for i in imgs if i and "/" not in i.split(":")[0].replace("docker.io", "") or (i and i.count("/") == 0)})
     pub = sorted({i for i in imgs if i and "." not in i.split("/")[0] and "/" not in i.split("/")[0]})
-    add("No images from public/anonymous registries", not pub, "Pull images from a private/approved registry", "Public Container Image Repositories Accessible", ",".join(pub[:5]))
+    add("No images from public/anonymous registries", not pub, "Pull images from a private/approved registry", "Public Container Image Repositories Accessible", ",".join(pub))
 
     lat = sorted({i for i in imgs if i.endswith(":latest") or ":" not in i})
-    add("No mutable image tags (:latest / untagged)", not lat, "Pin images to an immutable tag or digest", "Mutable Containers", ",".join(lat[:5]))
+    add("No mutable image tags (:latest / untagged)", not lat, "Pin images to an immutable tag or digest", "Mutable Containers", ",".join(lat))
 
     hp = cnt(lambda p: cs(p, lambda c: any(pp.get("hostPort") for pp in c.get("ports", []) or [])))
     add("No hostPort exposures", not hp, "Remove hostPort; use Services instead", "Docker Container Ports Open", ",".join(hp))
 
     noss = cnt(lambda p: not (spec(p).get("securityContext", {}) or {}).get("seccompProfile") and not cs(p, lambda c: (c.get("securityContext", {}) or {}).get("seccompProfile")))
-    add("seccomp profiles set on all pods", not noss, "Set securityContext.seccompProfile (RuntimeDefault minimum)", "AppArmor/SELinux Profiles Not Set on Containers", ",".join(noss[:5]))
+    add("seccomp profiles set on all pods", not noss, "Set securityContext.seccompProfile (RuntimeDefault minimum)", "AppArmor/SELinux Profiles Not Set on Containers", ",".join(noss))
 
     envsec = cnt(lambda p: cs(p, lambda c: any("secret" in str((e.get("valueFrom") or {}).get("secretKeyRef", "")) or True for e in c.get("env", []) or [] if (e.get("valueFrom") or {}).get("secretKeyRef"))))
-    add("No secrets exposed as environment variables", not envsec, "Mount secrets as volumes instead of env vars", "Insecure Container Secret Storage", ",".join(envsec[:5]))
+    add("No secrets exposed as environment variables", not envsec, "Mount secrets as volumes instead of env vars", "Insecure Container Secret Storage", ",".join(envsec))
 
     ky = jsh("kubectl get clusterpolicies.kyverno.io -o json")
     if ky and ky.get("items"):
         aud = [k["metadata"]["name"] for k in ky["items"] if str(k.get("spec", {}).get("validationFailureAction", "")).lower() == "audit"]
-        add("Kyverno policies enforce (not audit-only)", not aud, "Set validationFailureAction: Enforce", "Kubernetes - Kyverno Policies Set to Audit", ",".join(aud[:5]))
+        add("Kyverno policies enforce (not audit-only)", not aud, "Set validationFailureAction: Enforce", "Kubernetes - Kyverno Policies Set to Audit", ",".join(aud))
     return out
 
 # ---------------- provider CLI checks ----------------
@@ -515,7 +515,8 @@ def cli_checks(prov):
             on = set(lg[0].get("types", [])) if lg and lg[0].get("enabled") else set()
             add("2.1.1", f"[{n}] Control plane audit logging enabled", "audit" in on, "Enable 'audit' (and api/authenticator) log types", str(sorted(on)))
             ep = c.get("resourcesVpcConfig", {})
-            add("3.1.1", f"[{n}] API endpoint not publicly accessible", not ep.get("endpointPublicAccess"), "Disable endpointPublicAccess or restrict publicAccessCidrs", f"public={ep.get('endpointPublicAccess')} cidrs={ep.get('publicAccessCidrs')}")
+            cidrs = ";".join(ep.get("publicAccessCidrs") or [])
+            add("3.1.1", f"[{n}] API endpoint not publicly accessible", not ep.get("endpointPublicAccess"), "Disable endpointPublicAccess or restrict publicAccessCidrs", f"public={ep.get('endpointPublicAccess')}; cidrs={cidrs}")
             add("4.1.1", f"[{n}] Secrets encrypted with KMS", bool(c.get("encryptionConfig")), "Associate a KMS key via encryptionConfig", str(c.get("encryptionConfig")))
             try: ve = float(c.get("version", "0"))
             except: ve = 0.0
@@ -582,7 +583,14 @@ def render(results, prov, outdir):
         md.append(f"**Risk:** {m.get('risk', 'Medium')}  |  **Category:** {m.get('cat', 'Security')}  |  **Non-compliant checks:** {len(rs)}\n")
         md.append("**Affected CIS controls:**")
         for r in rs:
-            md.append(f"- `{r['id']}` {r['desc']}" + (f" â€” evidence: `{r['evidence']}`" if r.get("evidence") else ""))
+            ev = r.get("evidence", "")
+            parts = [p.strip() for p in ev.split(",") if p.strip()]
+            if len(parts) > 12 and not any("@" in p or "=" in p for p in parts):
+                miss = {"5.2.x": "pod-security enforce label", "5.3.2": "NetworkPolicy", "5.4.x": "quota/limitrange"}.get(r["id"], "configuration")
+                evs = f"missing {miss} in {len(parts)} namespaces: " + ", ".join(parts[:10]) + f" â€¦ (+{len(parts) - 10})"
+            else:
+                evs = ev
+            md.append(f"- `{r['id']}` {r['desc']}" + (f" â€” evidence: `{evs}`" if evs else ""))
         nodeset = sorted({r["node"] for r in rs if r.get("node")} | {ev.split("@", 1)[1] for r in rs for ev in re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r.get("evidence", ""))})
         scopes = {r.get("scope", "entire cluster") for r in rs}
         if nodeset:
@@ -700,9 +708,14 @@ def main():
             print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m{sfx}")
             ev = r.get("evidence", "")
             if ev:
-                for part in ev.split(","):
-                    part = part.strip()
-                    if part: print(f"        - {part}")
+                parts = [p.strip() for p in ev.split(",") if p.strip()]
+                is_ns_wall = len(parts) > 12 and not any("@" in p or "=" in p for p in parts)
+                if is_ns_wall:
+                    miss = {"5.2.x": "pod-security enforce label", "5.3.2": "NetworkPolicy", "5.4.x": "quota/limitrange"}.get(r["id"], "configuration")
+                    print(f"        - missing {miss} in {len(parts)} namespaces, e.g.: " + ", ".join(parts[:8]) + f" â€¦ and {len(parts) - 8} more")
+                else:
+                    for part in parts:
+                        print(f"        - {part}")
         print("  " + "-" * 64)
         print("[*] CIS BENCHMARK:")
         fc = [r["id"] for r in results if r["status"] == "FAIL" and r["id"] != "EXTRA"]
