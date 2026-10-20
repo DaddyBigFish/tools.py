@@ -474,20 +474,25 @@ def api_checks():
     dn = cnt(lambda p: p["metadata"]["namespace"] == "default")
     add("5.7.1", "default namespace not used for workloads", not dn, "Move workloads out of the default namespace", ",".join(dn))
 
-    # enumerate valid namespaces first (cluster list, else derive from kubeconfig contexts)
+    # namespaces: --namespaces wins, else enumerate, else kubeconfig contexts
     ns = []
-    nsr = jsh("kubectl get namespaces -o json")
-    if nsr is None:
-        DENIED.add("namespaces")
+    if getattr(ARGS, "namespaces", None):
+        NSLIST = list(ARGS.namespaces)
+        ns = [{"metadata": {"name": n, "labels": {}}} for n in NSLIST]
+        print(f"[*] using {len(NSLIST)} specified namespace(s): " + ", ".join(NSLIST))
     else:
-        ns = nsr.get("items", [])
-    if not ns:
-        ctxns = jsh("kubectl config view -o json")
-        for c in (ctxns or {}).get("contexts", []):
-            nn = c.get("context", {}).get("namespace")
-            if nn: ns.append({"metadata": {"name": nn, "labels": {}}})
-        if ns: print("[*] namespaces from kubeconfig contexts (cluster-wide list denied)")
-    NSLIST = [n["metadata"]["name"] for n in ns] if ns else []
+        nsr = jsh("kubectl get namespaces -o json")
+        if nsr is None:
+            DENIED.add("namespaces")
+        else:
+            ns = nsr.get("items", [])
+        if not ns:
+            ctxns = jsh("kubectl config view -o json")
+            for c in (ctxns or {}).get("contexts", []):
+                nn = c.get("context", {}).get("namespace")
+                if nn: ns.append({"metadata": {"name": nn, "labels": {}}})
+            if ns: print("[*] namespaces from kubeconfig contexts (cluster-wide list denied)")
+        NSLIST = [n["metadata"]["name"] for n in ns] if ns else []
     if NSLIST:
         print(f"[*] checking {len(NSLIST)} namespace(s) individually: " + ", ".join(NSLIST[:10]) + (" ..." if len(NSLIST) > 10 else ""))
     sys_ns = {"kube-system", "kube-public", "kube-node-lease", "default"}
@@ -771,6 +776,7 @@ def main():
     ap.add_argument("--install", action="store_true")
     ap.add_argument("--skip-bench", action="store_true")
     ap.add_argument("--per-node", action="store_true", help="run kube-bench as a job on every node")
+    ap.add_argument("--namespaces", nargs="+", metavar="NS", help="explicit namespace list (skips enumeration)")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("-q", "--quiet", action="store_true")
     ap.add_argument("--show-cmds", action="store_true", help="print each command and its raw output")
@@ -778,6 +784,7 @@ def main():
     ap.add_argument("--report")
     ap.add_argument("--templates", help="path to findings-templates.json")
     a = ap.parse_args()
+    globals()["ARGS"] = a
     if a.show_cmds: globals()["SHOW_CMD"] = True
     if a.templates:
         globals()["TPL"] = a.templates
