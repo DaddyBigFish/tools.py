@@ -185,6 +185,7 @@ def sh(c, t=60):
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
 MISSING_PERMS = []
+NORISK = set()
 DENIED = set()
 PARTIAL = {}
 RAWJSON = {}
@@ -950,8 +951,8 @@ def main():
         for r in mapped:
             te = tget(TPLC, r["template"])
             risk = te.get("risk", "Medium").upper()
-            note = "" if te else "  \033[37m(risk defaulted: template not in templates file)\033[0m"
-            print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m{note}")
+            if not te: NORISK.add(r["template"])
+            print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m")
             cmd = RAWCMD.get(r.get("res") or "")
             if cmd:
                 print(f"      raw output: {cmd}")
@@ -966,6 +967,8 @@ def main():
                 for part in parts:
                     print(f"        - {part}")
         print("  " + "-" * 64)
+        if NORISK:
+            print("[!] risk defaulted to Medium (template missing from templates file): " + ", ".join(sorted(NORISK)))
         print("[*] CIS BENCHMARK:")
         fc = [r["id"] for r in results if r["status"] == "FAIL" and r["id"] != "EXTRA"]
         fe = sum(1 for r in results if r["status"] == "FAIL" and r["id"] == "EXTRA")
