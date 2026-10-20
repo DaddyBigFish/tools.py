@@ -125,15 +125,50 @@ def show(r):
         line = f"  {sym} {r['id']} {r['desc'][:80]}"
     print(line)
 
-def print_raw(res):
+def raw_lines(res, evid=""):
+    """pretty raw JSON lines + set of line indexes belonging to offending objects (matched by evidence)"""
     raw = RAWJSON.get(res or "")
-    if not raw: return
-    try: pretty = json.dumps(json.loads(raw), indent=1)
-    except: pretty = raw
-    trunc = len(pretty) > RAWMAX
-    print(f"      vulnerable raw output (kubectl get {res}, {'truncated' if trunc else 'full'}; full copy in results.json raw_outputs):")
-    for ln in pretty[:RAWMAX].splitlines():
-        print("        " + ln)
+    if not raw: return [], set()
+    bad = {p.strip() for chunk in (evid or "").split(",") for p in chunk.split(";") if p.strip()}
+    try: data = json.loads(raw)
+    except: data = None
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return raw.splitlines(), set()
+    lines = ["{", ' "items": [']
+    hit = set()
+    items = data["items"]
+    for i, it in enumerate(items):
+        md = it.get("metadata", {}) if isinstance(it, dict) else {}
+        nm, ns = md.get("name", ""), md.get("namespace", "")
+        keys = {nm, f"{ns}/{nm}", f"{ns}/{nm}@{it.get('spec', {}).get('nodeName', '?')}"}
+        il = ["  " + l for l in json.dumps(it, indent=1).splitlines()]
+        if i < len(items) - 1: il[-1] += ","
+        if bad & keys:
+            hit.update(range(len(lines), len(lines) + len(il)))
+        lines.extend(il)
+    lines += [" ]", "}"]
+    return lines, hit
+
+def print_raw(res, evid=""):
+    if not RAWJSON.get(res or ""): return
+    lines, hit = raw_lines(res, evid)
+    tot, cut = 0, len(lines)
+    for i, l in enumerate(lines):
+        tot += len(l) + 1
+        if tot > RAWMAX:
+            cut = i + 1
+            break
+    trunc = cut < len(lines)
+    nbad = sum(1 for i in hit if i < cut and (i - 1) not in hit)
+    hdr = f"      vulnerable raw output (kubectl get {res}"
+    hdr += ", truncated" if trunc else ""
+    hdr += (f"; {nbad} offending object(s) highlighted red" if nbad else "") + "; full copy in results.json raw_outputs):"
+    print(hdr)
+    for i, l in enumerate(lines[:cut]):
+        print("        " + (f"\033[31;1m{l}\033[0m" if i in hit else l))
+    if trunc: print("        ... (truncated)")
+    if not hit:
+        print("        (no offending objects inside the raw output - the issue is what is ABSENT; see vulnerable items below)")
 
 def have(c): return shutil.which(c) is not None
 SHOW_CMD = False
@@ -774,11 +809,11 @@ def render(results, prov, outdir):
         if nodeset:
             md.append("\n**Affected nodes:** " + ", ".join(f"`{n}`" for n in nodeset))
         for rr in sorted({r.get("res") for r in rs if r.get("res") and RAWJSON.get(r["res"])}):
-            try: pretty = json.dumps(json.loads(RAWJSON[rr]), indent=1)
-            except: pretty = RAWJSON[rr]
-            md.append(f"\n**Raw output (`{rr}`, truncated):**")
+            lines, hit = raw_lines(rr, ",".join(x.get("evidence", "") for x in rs if x.get("res") == rr))
+            mk = [l + "   <-- VULNERABLE" if i in hit and (i - 1) not in hit else l for i, l in enumerate(lines)]
+            md.append(f"\n**Raw output (`{rr}`, vulnerable objects marked, truncated):**")
             md.append("```")
-            md.append(pretty[:2000])
+            md.append("\n".join(mk)[:2000])
             md.append("```")
 
         md.append("\n**Details:** " + m.get("details", "").split("[^footnote")[0][:800])
@@ -902,7 +937,7 @@ def main():
             rawc = r.get("rawcfg")
             if rawc:
                 print("      " + rawc)
-            print_raw(r.get("res"))
+            print_raw(r.get("res"), r.get("evidence", ""))
             ev = r.get("evidence", "")
             if ev:
                 print("      vulnerable items:")
