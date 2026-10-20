@@ -126,9 +126,16 @@ def show(r):
     print(line)
 
 def have(c): return shutil.which(c) is not None
+SHOW_CMD = False
 def sh(c, t=60):
     try:
         r = subprocess.run(c, shell=True, capture_output=True, text=True, timeout=t)
+        if SHOW_CMD:
+            print(f"\n\033[36m$ {c}\033[0m")
+            body = (r.stdout or "").strip()
+            err = (r.stderr or "").strip()
+            if body: print(body[:4000])
+            if err and r.returncode != 0: print(f"\033[31m{err[:800]}\033[0m")
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
@@ -688,10 +695,12 @@ def main():
     ap.add_argument("--per-node", action="store_true", help="run kube-bench as a job on every node")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("-q", "--quiet", action="store_true")
+    ap.add_argument("--show-cmds", action="store_true", help="print each command and its raw output")
     ap.add_argument("--out", default="out")
     ap.add_argument("--report")
     ap.add_argument("--templates", help="path to findings-templates.json")
     a = ap.parse_args()
+    if a.show_cmds: globals()["SHOW_CMD"] = True
     if a.templates:
         globals()["TPL"] = a.templates
     global VERBOSE
@@ -706,6 +715,7 @@ def main():
         a.skip_bench = input("[?] run kube-bench node/config checks? [Y/n]: ").strip().lower() in ("n", "no")
         a.per_node = input("[?] per-node mode (run kube-bench as a job on every node)? [y/N]: ").strip().lower() in ("y", "yes")
         VERBOSE = a.verbose = input("[?] verbose check-by-check output? [Y/n]: ").strip().lower() not in ("n", "no")
+        globals()["SHOW_CMD"] = input("[?] show each command and its raw output? [y/N]: ").strip().lower() in ("y", "yes")
         a.out = input("[?] output directory [out]: ").strip() or "out"
     if a.install: ensure_tools()
     if a.report:
