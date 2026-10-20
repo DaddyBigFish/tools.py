@@ -449,7 +449,10 @@ def api_checks():
     ns = (jsh("kubectl get namespaces -o json") or (DENIED.add("namespaces") if "namespaces" not in DENIED else None) or {}).get("items", [])
     sys_ns = {"kube-system", "kube-public", "kube-node-lease", "default"}
     nolbl = []
-    RAWCFG.setdefault("5.2.x", "kubectl get ns <name> -o json -> metadata.labels: " + json.dumps((ns[0]["metadata"].get("labels") if ns and not any(k.startswith("pod-security.kubernetes.io/enforce") for k in (ns[0]["metadata"].get("labels") or {})) else {}) if ns else {}))
+    _psan = next((n for n in ns if n["metadata"]["name"] not in sys_ns and not any(k.startswith("pod-security.kubernetes.io/enforce") for k in (n["metadata"].get("labels") or {}))), None)
+    if _psan:
+        _l = _psan["metadata"].get("labels") or {}
+        RAWCFG.setdefault("5.2.x", f"kubectl get ns {_psan['metadata']['name']} -o jsonpath='{{.metadata.labels}}' -> " + json.dumps(_l) + "   (no 'pod-security.kubernetes.io/enforce' key present)")
     for n in ns:
         nm = n["metadata"]["name"]
         if nm in sys_ns: continue
