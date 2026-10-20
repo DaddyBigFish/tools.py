@@ -241,7 +241,7 @@ def ensure_tools():
             if rc == 0 or "already installed" in (o + e).lower():
                 print("[+] Docker Desktop installed - start it once, then rerun; kube-bench will use it")
             else:
-                print(f"[-] Docker install failed ({e.strip()[:100]}) - install Docker Desktop manually or use --per-node jobs")
+                print(f"[-] Docker install failed ({(e or o).strip()[:100]}) - install Docker Desktop manually or use --per-node jobs")
     elif not have(kb_bin()) or not os.path.isdir(kb_cfg()):
         print("[*] installing kube-bench " + KBV)
         import zipfile
@@ -431,8 +431,7 @@ def api_checks():
         if nm in sys_ns: continue
         lbls = n["metadata"].get("labels", {}) or {}
         if not any(k.startswith("pod-security.kubernetes.io/enforce") for k in lbls):
-            shown = "no labels" if not lbls else "labels=" + ";".join(f"{k}={v}" for k, v in list(lbls.items())[:3])
-            nolbl.append(f"{nm} (enforce label absent; {shown})")
+            nolbl.append(f"{nm} (no pod-security enforce label)")
     add("5.2.x", "Pod Security Standards enforced on all namespaces", not nolbl, "Label namespaces pod-security.kubernetes.io/enforce=baseline|restricted", ",".join(nolbl))
     np = (jsh("kubectl get networkpolicies -A -o json") or {}).get("items", [])
     covered = {p["metadata"]["namespace"] for p in np}
@@ -612,8 +611,15 @@ def render(results, prov, outdir):
             evs = ev
             md.append(f"- `{r['id']}` {r['desc']}")
             if evs:
-                for part in [p.strip() for p in evs.split(",") if p.strip()]:
-                    md.append(f"  - `{part}`")
+                parts2 = [p.strip() for p in evs.split(",") if p.strip()]
+                if len(parts2) > 15:
+                    md.append(f"  - {len(parts2)} affected (complete list in results.json):")
+                    for part in parts2[:15]:
+                        md.append(f"  - `{part}`")
+                    md.append(f"  - ... and {len(parts2) - 15} more")
+                else:
+                    for part in parts2:
+                        md.append(f"  - `{part}`")
         nodeset = sorted({r["node"] for r in rs if r.get("node")} | {ev.split("@", 1)[1] for r in rs for ev in re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r.get("evidence", ""))})
         scopes = {r.get("scope", "entire cluster") for r in rs}
         if nodeset:
@@ -732,8 +738,14 @@ def main():
             ev = r.get("evidence", "")
             if ev:
                 parts = [p.strip() for p in ev.split(",") if p.strip()]
-                for part in parts:
-                    print(f"        - {part}")
+                if len(parts) > 10:
+                    print(f"        - {len(parts)} affected (full list in results.json):")
+                    for part in parts[:10]:
+                        print(f"          - {part}")
+                    print(f"          ... and {len(parts) - 10} more")
+                else:
+                    for part in parts:
+                        print(f"        - {part}")
         print("  " + "-" * 64)
         print("[*] CIS BENCHMARK:")
         fc = [r["id"] for r in results if r["status"] == "FAIL" and r["id"] != "EXTRA"]
