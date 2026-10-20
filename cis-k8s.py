@@ -133,6 +133,7 @@ def sh(c, t=60):
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
 MISSING_PERMS = []
+RAWCFG = {}
 def note_perm(err):
     m = re.search(r'cannot (list|get|watch|create|delete|update|patch) resources? "([^"]+)"(?: in API group "([^"]*)")?', err or "")
     if m:
@@ -232,16 +233,6 @@ def ensure_tools():
         dst = os.path.join(TOOL_DIR, "kubectl" + exe)
         _download(f"https://dl.k8s.io/release/v1.31.0/bin/{osname}/{ARCH}/kubectl{exe}", dst)
         if not IS_WIN: os.chmod(dst, 0o755)
-    if IS_WIN:
-        if have("docker"):
-            print("[*] Docker found - kube-bench will run as a container (aquasec/kube-bench)")
-        else:
-            print("[*] installing Docker Desktop via winget (for kube-bench container)...")
-            rc, o, e = sh("winget install -e --id Docker.DockerDesktop --accept-source-agreements --accept-package-agreements", 900)
-            if rc == 0 or "already installed" in (o + e).lower():
-                print("[+] Docker Desktop installed - start it once, then rerun; kube-bench will use it")
-            else:
-                print(f"[-] Docker install failed ({(e or o).strip()[:100]}) - install Docker Desktop manually or use --per-node jobs")
     elif not have(kb_bin()) or not os.path.isdir(kb_cfg()):
         print("[*] installing kube-bench " + KBV)
         import zipfile
@@ -348,6 +339,22 @@ COVERAGE = {"vanilla": "engine cis-1.12 == CIS Kubernetes Benchmark v2.0.1 (124/
  "oke": "engine cis-1.12 (no OKE-specific config; node-level coverage)",
  "ack": "engine ack-1.0 == CIS ACK Benchmark v1.0.0 (latest)",
  "openshift": "engine rh-1.9 == CIS OpenShift Benchmark v1.9.0 (latest)"}
+def docker_up():
+    if not have("docker"): return False
+    if sh("docker version --format {{.Server.Version}}")[0] == 0: return True
+    if IS_WIN:
+        exe = os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Docker", "Docker", "Docker Desktop.exe")
+        if os.path.isfile(exe):
+            print("[*] starting Docker Desktop (first launch takes a minute)...")
+            subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import time as _t
+            for _ in range(18):
+                _t.sleep(10)
+                if sh("docker version --format {{.Server.Version}}")[0] == 0:
+                    print("[+] Docker is up")
+                    return True
+    return False
+
 def docker_bench_cmd(b):
     cfg = kb_cfg()
     mounts = f'-v "{cfg}:/etc/kube-bench/cfg"' if os.path.isdir(cfg) else ""
@@ -355,14 +362,14 @@ def docker_bench_cmd(b):
 
 def run_bench(prov):
     b = BENCH.get(prov)
-    if have("docker"):
+    if docker_up():
         c = docker_bench_cmd(b)
     elif have("kube-bench") or os.path.isfile(kb_bin()):
         c = f'"{kb_bin()}" run --json' if os.path.sep in kb_bin() else f"{kb_bin()} run --json"
         if os.path.isdir(kb_cfg()):
             c += f' --config-dir "{kb_cfg()}"'
     else:
-        msg = "kube-bench needs Docker or the kube-bench binary (or use --per-node in-cluster jobs)" if IS_WIN else "kube-bench not installed (run --install or install Docker)"
+        msg = "node-level checks are only useful on a cluster node; use --per-node (recommended) or run this tool on a node/bastion with Docker" if IS_WIN else "kube-bench not installed (run --install or install Docker)"
         return None, msg
     if b and "--benchmark" not in c:
         c += f" --benchmark {b}"
@@ -426,6 +433,7 @@ def api_checks():
     ns = (jsh("kubectl get namespaces -o json") or {}).get("items", [])
     sys_ns = {"kube-system", "kube-public", "kube-node-lease", "default"}
     nolbl = []
+    RAWCFG.setdefault("5.2.x", "kubectl get ns <name> -o json -> metadata.labels: " + json.dumps((ns[0]["metadata"].get("labels") if ns and not any(k.startswith("pod-security.kubernetes.io/enforce") for k in (ns[0]["metadata"].get("labels") or {})) else {}) if ns else {}))
     for n in ns:
         nm = n["metadata"]["name"]
         if nm in sys_ns: continue
@@ -434,6 +442,8 @@ def api_checks():
             nolbl.append(f"{nm} (no pod-security enforce label)")
     add("5.2.x", "Pod Security Standards enforced on all namespaces", not nolbl, "Label namespaces pod-security.kubernetes.io/enforce=baseline|restricted", ",".join(nolbl))
     np = (jsh("kubectl get networkpolicies -A -o json") or {}).get("items", [])
+    if not np:
+        RAWCFG['5.3.2'] = 'kubectl get networkpolicies -A -o json -> {"items": []}'
     covered = {p["metadata"]["namespace"] for p in np}
     nonp = [n["metadata"]["name"] + " (0 NetworkPolicies)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in covered]
     add("5.3.2", "All namespaces have NetworkPolicies", not nonp, "Create default-deny NetworkPolicies per namespace", ",".join(nonp))
@@ -442,7 +452,10 @@ def api_checks():
     am = [s["metadata"]["namespace"] + "/" + s["metadata"]["name"] for s in sa if s.get("automountServiceAccountToken") is True and s["metadata"]["name"] != "default"]
     add("5.1.6", "automountServiceAccountToken disabled unless needed", not am, "Set automountServiceAccountToken: false", ",".join(am))
 
-    rq = {(x["metadata"]["namespace"]) for x in (jsh("kubectl get resourcequotas -A -o json") or {}).get("items", [])}
+    rq_all = (jsh("kubectl get resourcequotas -A -o json") or {}).get("items", [])
+    rq = {(x["metadata"]["namespace"]) for x in rq_all}
+    if not rq_all:
+        RAWCFG['5.4.x-quota'] = 'kubectl get resourcequotas -A -o json -> {"items": []}'
     norq = [n["metadata"]["name"] + " (0 ResourceQuotas)" for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in rq]
     add("5.4.x", "All namespaces have ResourceQuotas", not norq, "Create ResourceQuota per namespace (namespace segregation)", ",".join(norq))
     lr = {(x["metadata"]["namespace"]) for x in (jsh("kubectl get limitranges -A -o json") or {}).get("items", [])}
@@ -538,8 +551,8 @@ def cli_checks(prov):
             on = set(lg[0].get("types", [])) if lg and lg[0].get("enabled") else set()
             add("2.1.1", f"[{n}] Control plane audit logging enabled", "audit" in on, "Enable 'audit' (and api/authenticator) log types", str(sorted(on)))
             ep = c.get("resourcesVpcConfig", {})
-            cidrs = ";".join(ep.get("publicAccessCidrs") or [])
-            add("3.1.1", f"[{n}] API endpoint not publicly accessible", not ep.get("endpointPublicAccess"), "Disable endpointPublicAccess or restrict publicAccessCidrs", f"public={ep.get('endpointPublicAccess')}; cidrs={cidrs}")
+            cidrs = ";".join("cidr:" + c for c in (ep.get("publicAccessCidrs") or []))
+            add("3.1.1", f"[{n}] API endpoint not publicly accessible", not ep.get("endpointPublicAccess"), "Disable endpointPublicAccess or restrict publicAccessCidrs", f"public={ep.get('endpointPublicAccess')};{cidrs}")
             add("4.1.1", f"[{n}] Secrets encrypted with KMS", bool(c.get("encryptionConfig")), "Associate a KMS key via encryptionConfig", str(c.get("encryptionConfig")))
             try: ve = float(c.get("version", "0"))
             except: ve = 0.0
@@ -611,15 +624,17 @@ def render(results, prov, outdir):
             evs = ev
             md.append(f"- `{r['id']}` {r['desc']}")
             if evs:
-                parts2 = [p.strip() for p in evs.split(",") if p.strip()]
-                if len(parts2) > 15:
-                    md.append(f"  - {len(parts2)} affected (complete list in results.json):")
-                    for part in parts2[:15]:
-                        md.append(f"  - `{part}`")
-                    md.append(f"  - ... and {len(parts2) - 15} more")
-                else:
-                    for part in parts2:
-                        md.append(f"  - `{part}`")
+                parts2 = []
+                for chunk in evs.split(","):
+                    parts2.extend(p.strip() for p in chunk.split(";") if p.strip())
+                for part in parts2:
+                    md.append(f"  - `{part}`")
+            rawc = RAWCFG.get(r["id"]) or RAWCFG.get(r["id"] + "-quota")
+            if rawc:
+                md.append("\n  Misconfiguration (raw):")
+                md.append("  ```")
+                md.append("  " + rawc.replace("\n", "\n  "))
+                md.append("  ```")
         nodeset = sorted({r["node"] for r in rs if r.get("node")} | {ev.split("@", 1)[1] for r in rs for ev in re.findall(r"[\w.-]+/[\w.-]+@[\w.-]+", r.get("evidence", ""))})
         scopes = {r.get("scope", "entire cluster") for r in rs}
         if nodeset:
@@ -737,15 +752,11 @@ def main():
             print(f"  \033[31m\u2717\033[0m {r['id']}  \033[{COL.get(risk, 37)}m[{risk}]\033[0m \033[1m{r['template']}\033[0m{sfx}")
             ev = r.get("evidence", "")
             if ev:
-                parts = [p.strip() for p in ev.split(",") if p.strip()]
-                if len(parts) > 10:
-                    print(f"        - {len(parts)} affected (full list in results.json):")
-                    for part in parts[:10]:
-                        print(f"          - {part}")
-                    print(f"          ... and {len(parts) - 10} more")
-                else:
-                    for part in parts:
-                        print(f"        - {part}")
+                parts = []
+                for chunk in ev.split(","):
+                    parts.extend(p.strip() for p in chunk.split(";") if p.strip())
+                for part in parts:
+                    print(f"        - {part}")
         print("  " + "-" * 64)
         print("[*] CIS BENCHMARK:")
         fc = [r["id"] for r in results if r["status"] == "FAIL" and r["id"] != "EXTRA"]
