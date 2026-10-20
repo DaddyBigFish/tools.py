@@ -125,6 +125,16 @@ def show(r):
         line = f"  {sym} {r['id']} {r['desc'][:80]}"
     print(line)
 
+def print_raw(res):
+    raw = RAWJSON.get(res or "")
+    if not raw: return
+    try: pretty = json.dumps(json.loads(raw), indent=1)
+    except: pretty = raw
+    trunc = len(pretty) > RAWMAX
+    print(f"      vulnerable raw output (kubectl get {res}, {'truncated' if trunc else 'full'}; full copy in results.json raw_outputs):")
+    for ln in pretty[:RAWMAX].splitlines():
+        print("        " + ln)
+
 def have(c): return shutil.which(c) is not None
 SHOW_CMD = False
 def sh(c, t=60):
@@ -142,6 +152,9 @@ def sh(c, t=60):
 MISSING_PERMS = []
 DENIED = set()
 PARTIAL = {}
+RAWJSON = {}
+CUR_RES = None
+RAWMAX = int(os.environ.get("CISK8S_RAW_MAX", "3000"))
 RAWCFG = {}
 def note_perm(err):
     m = re.search(r'cannot (list|get|watch|create|delete|update|patch) resources? "([^"]+)"(?: in API group "([^"]*)")?', err or "")
@@ -157,13 +170,16 @@ def note_perm(err):
         return True
     return False
 
-def jsh(c):
+def jsh(c, res=None):
     rc, o, e = sh(c)
-    m2 = re.search(r'cannot list resources? "([^"]+)"', e or "")
+    m2 = re.search(r'cannot (?:list|get|watch|create) resources? "([^"]+)"', e or "") or re.search(r'"?(\w[\w.-]*)"? is forbidden', e or "")
     if m2:
         DENIED.add(m2.group(1))
         return None
-    try: return json.loads(o)
+    try:
+        d = json.loads(o)
+        if res: RAWJSON[res] = o
+        return d
     except:
         if rc != 0: note_perm(e)
         return None
@@ -392,10 +408,10 @@ def per_ns(cmd, res):
     for n in NSLIST:
         ncmd = cmd.replace(" -A ", f" --namespace {n} ").replace("-A", f"--namespace {n}")
         rc, o, e = sh(ncmd)
+        if re.search(r'cannot (list|get|watch)|is forbidden|Forbidden', e or ""):
+            denied.append(n)
+            continue
         if rc != 0:
-            if "cannot list" in (e or "") or "Forbidden" in (e or ""):
-                denied.append(n)
-                continue
             continue
         try:
             items = json.loads(o).get("items", [])
@@ -408,11 +424,12 @@ def per_ns(cmd, res):
     if denied:
         print(f"    (no access in {len(denied)} namespace(s): " + ", ".join(denied[:6]) + (", ..." if len(denied) > 6 else "") + ")")
     PARTIAL[res] = denied
+    RAWJSON[res] = json.dumps({"items": out})
     return out
 
 def get_items(cmd, res):
     """cluster-scope list with per-namespace fallback; DENIED = no data at all, PARTIAL = fallback used"""
-    d = jsh(cmd)
+    d = jsh(cmd, res)
     if d is not None:
         return d.get("items", [])
     if NSLIST:
@@ -427,7 +444,7 @@ def get_items(cmd, res):
 NSLIST = []
 
 def api_checks():
-    global KVER, DENIED, NSLIST
+    global KVER, DENIED, NSLIST, CUR_RES
     out = []
     if not have("kubectl") and not have("kubectl.exe"):
         print("[-] kubectl not found - run: python3 cis-k8s.py --install")
@@ -450,10 +467,11 @@ def api_checks():
             print("    " + (e.strip().splitlines() or ["no cluster"])[-1][:120])
         return out
     def add(cid, desc, ok, rem, evid=""):
-        r = {"id": cid, "desc": desc, "status": "PASS" if ok else "FAIL", "remediation": rem, "evidence": evid, "src": "api"}
+        r = {"id": cid, "desc": desc, "status": "PASS" if ok else "FAIL", "remediation": rem, "evidence": evid, "src": "api", "res": CUR_RES}
         out.append(r); show(r)
 
-    crb_d = jsh("kubectl get clusterrolebindings -o json")
+    CUR_RES = "clusterrolebindings"
+    crb_d = jsh("kubectl get clusterrolebindings -o json", "clusterrolebindings")
     if crb_d is None:
         DENIED.add("clusterrolebindings")
         print("[-] 5.1.1/5.1.x skipped: cannot list clusterrolebindings (denied, recorded in permissions) - not a finding, no verdict emitted")
@@ -464,7 +482,8 @@ def api_checks():
         adm = [b["metadata"]["name"] for b in crb if b.get("roleRef", {}).get("name") == "cluster-admin" and any(s.get("kind") in ("User", "Group") and not str(s.get("name", "")).startswith("system:") for s in b.get("subjects", []))]
         add("5.1.1", "cluster-admin only used where required", not adm, "Restrict cluster-admin to break-glass admin accounts", ",".join(adm))
 
-    rol_d = jsh("kubectl get clusterroles -o json")
+    CUR_RES = "clusterroles"
+    rol_d = jsh("kubectl get clusterroles -o json", "clusterroles")
     if rol_d is None:
         DENIED.add("clusterroles")
         print("[-] 5.1.2/5.1.3 skipped: cannot list clusterroles (denied, recorded in permissions) - not a finding, no verdict emitted")
@@ -482,7 +501,7 @@ def api_checks():
         ns = [{"metadata": {"name": n, "labels": {}}} for n in NSLIST]
         print(f"[*] using {len(NSLIST)} specified namespace(s): " + ", ".join(NSLIST))
     else:
-        nsr = jsh("kubectl get namespaces -o json")
+        nsr = jsh("kubectl get namespaces -o json", "namespaces")
         if nsr is None:
             DENIED.add("namespaces")
         else:
@@ -497,6 +516,7 @@ def api_checks():
     if NSLIST:
         print(f"[*] checking {len(NSLIST)} namespace(s) individually: " + ", ".join(NSLIST[:10]) + (" ..." if len(NSLIST) > 10 else ""))
 
+    CUR_RES = "pods"
     pods = get_items("kubectl get pods -A -o json", "pods")
     def cnt(f): return [p["metadata"]["namespace"] + "/" + p["metadata"]["name"] + "@" + p.get("spec", {}).get("nodeName", "?") for p in pods if f(p)]
     spec = lambda p: p.get("spec", {})
@@ -517,6 +537,7 @@ def api_checks():
         dn = cnt(lambda p: p["metadata"]["namespace"] == "default")
         add("5.7.1", "default namespace not used for workloads", not dn, "Move workloads out of the default namespace", ",".join(dn))
     sys_ns = {"kube-system", "kube-public", "kube-node-lease", "default"}
+    CUR_RES = "namespaces"
     nolbl = []
     _psan = next((n for n in ns if n["metadata"]["name"] not in sys_ns and not any(k.startswith("pod-security.kubernetes.io/enforce") for k in (n["metadata"].get("labels") or {}))), None)
     if _psan:
@@ -529,6 +550,7 @@ def api_checks():
         if not any(k.startswith("pod-security.kubernetes.io/enforce") for k in lbls):
             nolbl.append(nm)
     add("5.2.x", "Pod Security Standards enforced on all namespaces", not nolbl, "Label namespaces pod-security.kubernetes.io/enforce=baseline|restricted", ",".join(nolbl))
+    CUR_RES = "networkpolicies"
     np = get_items("kubectl get networkpolicies -A -o json", "networkpolicies")
     if "networkpolicies" in DENIED:
         print("[-] 5.3.2 skipped: cannot list networkpolicies (denied, recorded in permissions) - not a finding")
@@ -539,6 +561,7 @@ def api_checks():
         nonp = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in covered]
         add("5.3.2", "All namespaces have NetworkPolicies", not nonp, "Create default-deny NetworkPolicies per namespace", ",".join(nonp))
 
+    CUR_RES = "serviceaccounts"
     sa = get_items("kubectl get serviceaccounts -A -o json", "serviceaccounts")
     if "serviceaccounts" in DENIED:
         print("[-] 5.1.6 skipped: cannot list serviceaccounts (denied, recorded in permissions) - not a finding, no verdict emitted")
@@ -546,6 +569,7 @@ def api_checks():
         am = [s["metadata"]["namespace"] + "/" + s["metadata"]["name"] for s in sa if s.get("automountServiceAccountToken") is True and s["metadata"]["name"] != "default"]
         add("5.1.6", "automountServiceAccountToken disabled unless needed", not am, "Set automountServiceAccountToken: false", ",".join(am))
 
+    CUR_RES = "resourcequotas"
     rq_all = get_items("kubectl get resourcequotas -A -o json", "resourcequotas")
     if "resourcequotas" in DENIED:
         print("[-] 5.4.x quota check skipped: cannot list resourcequotas (denied, recorded in permissions) - not a finding, no verdict emitted")
@@ -555,6 +579,7 @@ def api_checks():
             RAWCFG['5.4.x-quota'] = 'kubectl get resourcequotas -A -o json -> {"items": []}'
         norq = [n["metadata"]["name"] for n in ns if n["metadata"]["name"] not in sys_ns and n["metadata"]["name"] not in rq]
         add("5.4.x", "All namespaces have ResourceQuotas", not norq, "Create ResourceQuota per namespace (namespace segregation)", ",".join(norq))
+    CUR_RES = "limitranges"
     lr_all = get_items("kubectl get limitranges -A -o json", "limitranges")
     if "limitranges" in DENIED:
         print("[-] 5.4.x limitrange check skipped: cannot list limitranges (denied, recorded in permissions) - not a finding, no verdict emitted")
@@ -564,6 +589,7 @@ def api_checks():
         add("5.4.x", "All namespaces have LimitRanges", not nolr, "Create LimitRange per namespace for default requests/limits", ",".join(nolr))
 
     if CUR_PROV == "eks" and "serviceaccounts" not in DENIED:
+        CUR_RES = "serviceaccounts"
         noi = [s["metadata"]["namespace"] + "/" + s["metadata"]["name"] for s in sa
                if s.get("automountServiceAccountToken") is not False and "eks.amazonaws.com/role-arn" not in (s.get("annotations") or {}) and s["metadata"]["name"] != "default"]
         add("EKS-SA", "Service accounts use IRSA instead of node instance role", not noi, "Annotate SAs with eks.amazonaws.com/role-arn (IRSA) or disable automount; node role credentials are otherwise exposed to pods", ",".join(noi))
@@ -574,8 +600,10 @@ def extra_checks():
     out = []
     if not have("kubectl"): return out
     if sh("kubectl version --request-timeout=8s")[0] != 0: return out
+    global CUR_RES
+    CUR_RES = "pods"
     def add(desc, ok, rem, tpl, evid=""):
-        r = {"id": "EXTRA", "desc": desc, "status": "PASS" if ok else "FAIL", "remediation": rem, "evidence": evid, "src": "extra", "template": tpl if not ok else None}
+        r = {"id": "EXTRA", "desc": desc, "status": "PASS" if ok else "FAIL", "remediation": rem, "evidence": evid, "src": "extra", "res": CUR_RES, "template": tpl if not ok else None}
         out.append(r); show(r)
     pods = get_items("kubectl get pods -A -o json", "pods")
     pdenied = "pods" in DENIED
@@ -610,7 +638,8 @@ def extra_checks():
         envsec = cnt(lambda p: cs(p, lambda c: any("secret" in str((e.get("valueFrom") or {}).get("secretKeyRef", "")) or True for e in c.get("env", []) or [] if (e.get("valueFrom") or {}).get("secretKeyRef"))))
         add("No secrets exposed as environment variables", not envsec, "Mount secrets as volumes instead of env vars", "Insecure Container Secret Storage", ",".join(envsec))
 
-    ky = jsh("kubectl get clusterpolicies.kyverno.io -o json")
+    CUR_RES = "clusterpolicies"
+    ky = jsh("kubectl get clusterpolicies.kyverno.io -o json", "clusterpolicies")
     if ky and ky.get("items"):
         aud = [k["metadata"]["name"] for k in ky["items"] if str(k.get("spec", {}).get("validationFailureAction", "")).lower() == "audit"]
         add("Kyverno policies enforce (not audit-only)", not aud, "Set validationFailureAction: Enforce", "Kubernetes - Kyverno Policies Set to Audit", ",".join(aud))
@@ -744,6 +773,13 @@ def render(results, prov, outdir):
         scopes = {r.get("scope", "entire cluster") for r in rs}
         if nodeset:
             md.append("\n**Affected nodes:** " + ", ".join(f"`{n}`" for n in nodeset))
+        for rr in sorted({r.get("res") for r in rs if r.get("res") and RAWJSON.get(r["res"])}):
+            try: pretty = json.dumps(json.loads(RAWJSON[rr]), indent=1)
+            except: pretty = RAWJSON[rr]
+            md.append(f"\n**Raw output (`{rr}`, truncated):**")
+            md.append("```")
+            md.append(pretty[:2000])
+            md.append("```")
 
         md.append("\n**Details:** " + m.get("details", "").split("[^footnote")[0][:800])
         md.append("\n**Recommendation:** " + m.get("rec", ""))
@@ -808,6 +844,7 @@ def main():
     if a.install: ensure_tools()
     if a.report:
         d = json.load(open(a.report))
+        RAWJSON.update(d.get("raw_outputs", {}))
         print(render(d["results"], d["provider"], os.path.dirname(a.report) or "."))
         return
     prov = (a.provider or detect_provider() or "vanilla").replace("-cli", "")
@@ -865,8 +902,10 @@ def main():
             rawc = r.get("rawcfg")
             if rawc:
                 print("      " + rawc)
+            print_raw(r.get("res"))
             ev = r.get("evidence", "")
             if ev:
+                print("      vulnerable items:")
                 parts = []
                 for chunk in ev.split(","):
                     parts.extend(p.strip() for p in chunk.split(";") if p.strip())
@@ -884,7 +923,7 @@ def main():
         print(f"  \033[32mPASSED ({len(pc) + pe}):\033[0m " + pl)
     jf = os.path.join(a.out, "results.json")
     cov = {"skipped": sorted(DENIED), "reduced_scope": {r: d for r, d in sorted(PARTIAL.items())}}
-    json.dump({"provider": prov, "ts": datetime.now(timezone.utc).isoformat(), "coverage": cov, "results": results}, open(jf, "w"), indent=1)
+    json.dump({"provider": prov, "ts": datetime.now(timezone.utc).isoformat(), "coverage": cov, "raw_outputs": RAWJSON, "results": results}, open(jf, "w"), indent=1)
     print(f"[+] {jf}")
     print(f"[+] {render(results, prov, a.out)}")
     fails = sum(1 for r in results if r["status"] == "FAIL")
