@@ -352,20 +352,9 @@ COVERAGE = {"vanilla": "engine cis-1.12 == CIS Kubernetes Benchmark v2.0.1 (124/
  "ack": "engine ack-1.0 == CIS ACK Benchmark v1.0.0 (latest)",
  "openshift": "engine rh-1.9 == CIS OpenShift Benchmark v1.9.0 (latest)"}
 def docker_up():
+    if IS_WIN: return False
     if not have("docker"): return False
-    if sh("docker version --format {{.Server.Version}}")[0] == 0: return True
-    if IS_WIN:
-        exe = os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Docker", "Docker", "Docker Desktop.exe")
-        if os.path.isfile(exe):
-            print("[*] starting Docker Desktop (first launch takes a minute)...")
-            subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            import time as _t
-            for _ in range(18):
-                _t.sleep(10)
-                if sh("docker version --format {{.Server.Version}}")[0] == 0:
-                    print("[+] Docker is up")
-                    return True
-    return False
+    return sh("docker version --format {{.Server.Version}}")[0] == 0
 
 def docker_bench_cmd(b):
     cfg = kb_cfg()
