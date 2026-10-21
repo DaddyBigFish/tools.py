@@ -686,8 +686,8 @@ def extra_checks():
         hp = cnt(lambda p: cs(p, lambda c: any(pp.get("hostPort") for pp in c.get("ports", []) or [])))
         add("No hostPort exposures", not hp, "Remove hostPort; use Services instead", "Docker Container Ports Open", ",".join(hp))
 
-        aprof = lambda p: any((c.get("securityContext", {}) or {}).get("appArmorProfile") for c in spec(p).get("containers", [])) or any(str(k).startswith("container.apparmor.security.beta.kubernetes.io/") for k in (p["metadata"].get("annotations") or {}))
-        noss = cnt(lambda p: not (spec(p).get("securityContext", {}) or {}).get("seccompProfile") and not cs(p, lambda c: (c.get("securityContext", {}) or {}).get("seccompProfile")) and not aprof(p))
+        aprof = lambda p, c: ((c.get("securityContext", {}) or {}).get("appArmorProfile")) or ((p["metadata"].get("annotations") or {}).get(f"container.apparmor.security.beta.kubernetes.io/{c.get('name', '')}"))
+        noss = cnt(lambda p: not (spec(p).get("securityContext", {}) or {}).get("seccompProfile") and cs(p, lambda c: not ((c.get("securityContext", {}) or {}).get("seccompProfile")) and not aprof(p, c)))
         add("seccomp or AppArmor profiles set on all pods", not noss, "Set securityContext.seccompProfile={type: RuntimeDefault} or an AppArmor profile (securityContext.appArmorProfile on k8s >=1.30, container.apparmor.security.beta.kubernetes.io/<container> annotation on older) on every pod", "Kubernetes - Seccomp/AppArmor Profiles Not Set on Containers", ",".join(noss))
 
         envsec = cnt(lambda p: cs(p, lambda c: any("secret" in str((e.get("valueFrom") or {}).get("secretKeyRef", "")) or True for e in c.get("env", []) or [] if (e.get("valueFrom") or {}).get("secretKeyRef"))))
