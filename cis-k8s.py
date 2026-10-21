@@ -29,8 +29,8 @@ MAP = [
  (r"hostipc|host process", "Kubernetes Workload Hardening"),
  (r"hostnetwork", "Kubernetes Workload Hardening"),
  (r"hostpath|host path", "Container Mounts Sensitive Host Paths"),
- (r"privilegeescalation|privilege escalation", "Container Not Restricted From Acquiring Privileges"),
- (r"runasnonroot|run as non root|runasuser.*0|root user|uid 0|running as.*root", "Container Running With root Privileges"),
+ (r"privilegeescalation|privilege escalation", "Kubernetes - AllowPrivilegeEscalation Enabled"),
+ (r"runasnonroot|run as non root|runasuser.*0|root user|uid 0|running as.*root", "Kubernetes - Container Running With root Privileges"),
  (r"net_raw|capabilities", "Container Hardening Not Performed"),
  (r"seccomp|apparmor|selinux", "AppArmor/SELinux Profiles Not Set on Containers"),
  (r"pod security polic|pod security standard|podsecurity", "Kubernetes - Pod Security Standards Not Enforced"),
@@ -44,7 +44,7 @@ MAP = [
  (r"resource ?(quota|limit)", "Kubernetes - Cluster Without Defined Resource Quotas or Limits"),
  (r"limitrange|memory and cpu limits", "Container Resource Limits Not in Place"),
  (r"metadata.*(conceal|server)|169\.254", "Workload Container Access to Cloud Instance Metadata Service"),
- (r"latest tag|image.*latest", "Outdated Base Container Image"),
+ (r"latest tag|image.*latest", "Kubernetes - Kubernetes Mutable Containers"),
  (r"version|upgrade", "Unsupported Kubernetes Version In Use"),
  (r"public.*(endpoint|access)|endpoint.*public|authorized networks|master authorized", "Kubernetes API Publicly Exposed"),
  (r"etcd.*(cert-auth|auth)|client-cert-auth", "Etcd available without authentication"),
@@ -681,7 +681,7 @@ def extra_checks():
         add("No images from public/anonymous registries", not pub, "Pull images from a private/approved registry", "Public Container Image Repositories Accessible", ",".join(pub))
 
         lat = sorted({i for i in imgs if i.endswith(":latest") or ":" not in i})
-        add("No mutable image tags (:latest / untagged)", not lat, "Pin images to an immutable tag or digest", "Mutable Containers", ",".join(lat))
+        add("No mutable image tags (:latest / untagged)", not lat, "Pin images to an immutable tag or digest", "Kubernetes - Kubernetes Mutable Containers", ",".join(lat))
 
         hp = cnt(lambda p: cs(p, lambda c: any(pp.get("hostPort") for pp in c.get("ports", []) or [])))
         add("No hostPort exposures", not hp, "Remove hostPort; use Services instead", "Docker Container Ports Open", ",".join(hp))
