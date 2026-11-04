@@ -1,6 +1,6 @@
 function Invoke-SMBList{
 [CmdletBinding()]
-param([switch]$h,[string[]]$Hosts,[string]$OutFile="smblist_$(Get-Date -f yyyyMMdd_HHmmss).txt",[int]$Depth=0,[switch]$IncludeHidden,[pscredential]$Credential,[switch]$InMemory)
+param([Parameter(Position=0)][string[]]$Hosts,[switch]$h,[string]$OutFile="smblist_$(Get-Date -f yyyyMMdd_HHmmss).txt",[int]$Depth=0,[switch]$IncludeHidden,[pscredential]$Credential,[switch]$InMemory)
 if($h){@'
 smblist.ps1 - native SMB share+file enumerator (full-depth, fileless-capable)
 
@@ -11,6 +11,7 @@ targets:
   (none)                    all enabled AD computers via LDAP
   -Hosts hosts.txt          file, one host/FQDN per line
   -Hosts SRV01.corp.local   single host
+  SRV01.corp.local            (positional shorthand, same as -Hosts)
 
 options:
   -Depth 3                  cap recursion (default: unlimited, like smbclient recurse;ls)
