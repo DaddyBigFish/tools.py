@@ -23,59 +23,60 @@ function Q($f){$s=if($cp){[adsisearcher]::new([DirectoryServices.DirectoryEntry]
 function Emit($risk,$title,$ev){$l="[$risk] $title :: $ev";if($OutFile){$l|Add-Content $OutFile}else{$l};Write-Verbose $l}
 $d=(Q '(objectClass=domainDNS)')[0].Properties
 $maq=$d.'ms-ds-machineaccountquota'[0]
-if($maq -gt 0){Emit Medium "[APM] - Active Directory - Machine Account Quota" "ms-DS-MachineAccountQuota=$maq — any user can join $maq machines"}
-if($maq -gt 0){Emit Medium "Authenticated Users can Create Machine Accounts" "quota=$maq"}
+if($maq -gt 0){Emit Medium '[APM] - Active Directory - Machine Account Quota' "ms-DS-MachineAccountQuota=$maq — any user can join $maq machines"}
+if($maq -gt 0){Emit Medium 'Authenticated Users can Create Machine Accounts' "quota=$maq"}
 $mpl=$d.minpwdlength[0];$mpa=[int]([math]::Abs($d.maxpwdage[0])/864000000000);$lt=$d.lockoutthreshold[0]
-if($mpl -lt 12 -or $mpa -gt 90 -or $lt -eq 0){Emit Medium "Domain Account Policy" "minLength=$mpl maxAge=${mpa}d lockoutThreshold=$lt"}
+if($mpl -lt 12 -or $mpa -gt 90 -or $lt -eq 0){Emit Medium 'Domain Account Policy' "minLength=$mpl maxAge=${mpa}d lockoutThreshold=$lt"}
 $dflMap=@{0='2000';1='2003';2='2008';3='2008R2';4='2012';5='2012R2';6='2016';7='2019+'}
 $dfl=$d.'msds-behavior-version'[0]
-if($dfl -lt 6){Emit Medium "Domain Functional Level" "msDS-Behavior-Version=$dfl ($($dflMap[[int]$dfl]))"}
+$dflName=$dflMap[[int]$dfl]
+if($dfl -lt 6){Emit Medium 'Domain Functional Level' "msDS-Behavior-Version=$dfl ($dflName)"}
 $rb=Q "(cn=recycle bin feature,cn=optional features,cn=directory service,cn=windows nt,cn=services,$cfg)"
 if(!$rb){Emit Medium "Active Directory Recycle Bin Not Enabled" "msDS-EnabledFeature absent"}
 $kt=[DateTime]::FromFileTime((Q '(sAMAccountName=krbtgt)')[0].Properties.pwdlastset[0])
-if($kt -lt (Get-Date).AddDays(-180)){Emit High "Krbtgt Password Not Changed Regularly" "krbtgt pwdLastSet=$($kt.ToString('yyyy-MM-dd'))"}
+if($kt -lt (Get-Date).AddDays(-180)){Emit High 'Krbtgt Password Not Changed Regularly' "krbtgt pwdLastSet=$($kt.ToString('yyyy-MM-dd'))"}
 $roast=(Q '(&(objectCategory=user)(servicePrincipalName=*)(!(sAMAccountName=krbtgt))(!(userAccountControl:1.2.840.113556.1.4.803:=2)))')|%{$_.Properties.samaccountname[0]}
-if($roast){Emit High "Domain Vulnerable to Kerberoasting" "$($roast.Count) SPN accounts: $($roast -join', ')"}
+if($roast){Emit High 'Domain Vulnerable to Kerberoasting' "$($roast.Count) SPN accounts: $($roast -join', ')"}
 $asrep=(Q '(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))')|%{$_.Properties.samaccountname[0]}
-if($asrep){Emit Medium "Kerberos Pre-Authentication Disabled" "$($asrep.Count) accounts: $($asrep -join', ')"}
+if($asrep){Emit Medium 'Kerberos Pre-Authentication Disabled' "$($asrep.Count) accounts: $($asrep -join', ')"}
 $nev=(Q '(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=65536)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))').Count
-if($nev -gt 0){Emit Low "[APM] - Active Directory - Passwords Never Expire" "$nev accounts"}
+if($nev -gt 0){Emit Low '[APM] - Active Directory - Passwords Never Expire' "$nev accounts"}
 $rev=(Q '(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=128))')|%{$_.Properties.samaccountname[0]}
-if($rev){Emit Medium "Insecure Password Policies" "$($rev.Count) reversible-encryption accounts: $($rev -join', ')"}
+if($rev){Emit Medium 'Insecure Password Policies' "$($rev.Count) reversible-encryption accounts: $($rev -join', ')"}
 $pnr=(Q '(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=32)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))')|%{$_.Properties.samaccountname[0]}
-if($pnr){Emit High "Weak Domain User Passwords" "$($pnr.Count) PASSWD_NOTREQD: $($pnr -join', ')"}
+if($pnr){Emit High 'Weak Domain User Passwords' "$($pnr.Count) PASSWD_NOTREQD: $($pnr -join', ')"}
 $da=(Q "(distinguishedName=CN=Domain Admins,CN=Users,$nc)")[0].Properties.member
-if($da.Count -gt 5){Emit Medium "Large Number of Domain Administrators" "$($da.Count) members"}
+if($da.Count -gt 5){Emit Medium 'Large Number of Domain Administrators' "$($da.Count) members"}
 $svcDA=(Q "(&(objectCategory=user)(servicePrincipalName=*)(memberOf=CN=Domain Admins,CN=Users,$nc))")|%{$_.Properties.samaccountname[0]}
-if($svcDA){Emit Medium "[APM] - Active Directory - Service Account with High Privileges" "$($svcDA -join', ')"}
+if($svcDA){Emit Medium '[APM] - Active Directory - Service Account with High Privileges' "$($svcDA -join', ')"}
 $unc=(Q '(&(userAccountControl:1.2.840.113556.1.4.803:=524288)(!(primaryGroupID=516)))')|%{$_.Properties.name[0]}
-if($unc){Emit Medium "Account Delegation" "unconstrained: $($unc -join', ')"}
+if($unc){Emit Medium 'Account Delegation' "unconstrained: $($unc -join', ')"}
 $cut=(Get-Date).AddDays(-90).ToFileTime()
 $stC=(Q "(&(objectCategory=computer)(lastLogonTimestamp<=$cut)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))").Count
-if($stC -gt 0){Emit Low "Inactive Domain Computer Accounts" "$stC stale 90d+"}
+if($stC -gt 0){Emit Low 'Inactive Domain Computer Accounts' "$stC stale 90d+"}
 $stU=(Q "(&(objectCategory=user)(lastLogonTimestamp<=$cut)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))").Count
-if($stU -gt 0){Emit Medium "[APM] - Active Directory - Inactive Accounts" "$stU stale users 90d+"}
+if($stU -gt 0){Emit Medium '[APM] - Active Directory - Inactive Accounts' "$stU stale users 90d+"}
 $weak=(Q '(&(objectCategory=user)(msDS-SupportedEncryptionTypes=*))')|%{$e=$_.Properties.'msds-supportedencryptiontypes'[0];if($e-band 7){$_.Properties.samaccountname[0]}}
-if($weak){Emit Low "Weak Kerberos Encryption Types Supported" "$($weak.Count) RC4/DES: $($weak -join', ')"}
+if($weak){Emit Low 'Weak Kerberos Encryption Types Supported' "$($weak.Count) RC4/DES: $($weak -join', ')"}
 $oldOS=(Q '(objectCategory=computer)')|%{$o=$_.Properties.operatingsystem;if($o-and$o[0]-match'2000|2003|2008[^R]|XP|Vista|Windows 7'){"$($_.Properties.name[0]) ($($o[0]))"}}
-if($oldOS){Emit High "[APM] - Active Directory - Unsupported Operating Systems" "$($oldOS.Count): $($oldOS -join', ')"}
+if($oldOS){Emit High '[APM] - Active Directory - Unsupported Operating Systems' "$($oldOS.Count): $($oldOS -join', ')"}
 $oldDC=(Q '(&(objectCategory=computer)(primaryGroupID=516))')|%{$o=$_.Properties.operatingsystem;if($o-and$o[0]-match'2000|2003'){"$($_.Properties.name[0]) ($($o[0]))"}}
-if($oldDC){Emit Critical "Windows 2003 Domain Controllers" "$($oldDC -join', ')"}
+if($oldDC){Emit Critical 'Windows 2003 Domain Controllers' "$($oldDC -join', ')"}
 $laps=(Q '(&(objectCategory=computer)(ms-Mcs-AdmPwd=*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))').Count
 $allC=(Q '(&(objectCategory=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))').Count
-if($laps -lt $allC){Emit Medium "[APM] - Endpoint - LAPS Implementation" "LAPS on $laps/$allC computers"}
+if($laps -lt $allC){Emit Medium '[APM] - Endpoint - LAPS Implementation' "LAPS on $laps/$allC computers"}
 $trusts=(Q '(objectClass=trustedDomain)')|%{$_.Properties.trustpartner[0]}
-if($trusts){Emit Medium "[APM] - Active Directory - Weak Domain ACLs" "review trusts: $($trusts -join', ')"}
+if($trusts){Emit Medium '[APM] - Active Directory - Weak Domain ACLs' "review trusts: $($trusts -join', ')"}
 if($DC){
   $lm=(reg query "\\$DC\HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v LmCompatibilityLevel 2>$null|sls 'LmCompatibilityLevel\s+REG_DWORD\s+(\S+)'|%{[Convert]::ToInt32($Matches[1],16)})
-  if(!$lm -or $lm -lt 3){Emit Medium "LM and NTLMv1 Authentication Enabled" "LmCompatibilityLevel=$lm on $DC"}
+  if(!$lm -or $lm -lt 3){Emit Medium 'LM and NTLMv1 Authentication Enabled' "LmCompatibilityLevel=$lm on $DC"}
   $ls=(reg query "\\$DC\HKLM\SYSTEM\CurrentControlSet\Services\NTDS\Parameters" /v LDAPServerIntegrity 2>$null|sls 'LDAPServerIntegrity\s+REG_DWORD\s+(\S+)'|%{[Convert]::ToInt32($Matches[1],16)})
-  if(!$ls -or $ls -lt 2){Emit Low "Domain Controller - Enforce LDAP Signing" "LDAPServerIntegrity=$ls on $DC"}
-  if(sc.exe "\\$DC" query spooler 2>$null|sls RUNNING){Emit Medium "Spooler Service Running on Domain Controllers" "spooler RUNNING on $DC"}
+  if(!$ls -or $ls -lt 2){Emit Low 'Domain Controller - Enforce LDAP Signing' "LDAPServerIntegrity=$ls on $DC"}
+  if(sc.exe "\\$DC" query spooler 2>$null|sls RUNNING){Emit Medium 'Spooler Service Running on Domain Controllers' "spooler RUNNING on $DC"}
 }
 if($SysvolLoot -and(Test-Path $SysvolLoot)){
   $gx=gc $SysvolLoot|sls 'SYSVOL'|sls '\.xml$|\.inf$|\.ps1$|\.bat$|\.vbs$'
-  if($gx){Emit High "Passwords in SYSVOL Share" "$($gx.Count) candidate files — pull and grep cpassword="}
+  if($gx){Emit High 'Passwords in SYSVOL Share' "$($gx.Count) candidate files — pull and grep cpassword="}
 }
 "[i] done -> $(if($OutFile){$OutFile}else{'pipeline'})"|Write-Host -F Cyan
 }
