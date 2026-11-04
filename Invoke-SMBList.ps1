@@ -51,14 +51,14 @@ function Walk($h,$s){
     gci @a|%{"//$h/$s"+$_.FullName.Substring($root.Length)-replace'\\','/'}}finally{if($d){Remove-PSDrive $d -Force -EA 0}}}
 $f=0;$dl=if($Depth){"depth $Depth"}else{'full depth'}
 "[i] $($t.Count) hosts, $dl, out: $(if($OutFile){$OutFile}else{'pipeline'})"|Write-Host -F Cyan
-foreach($h in $t){
-  if(!(Test-Connection $h -Count 1 -Quiet -EA 0)){Write-Verbose "[-] $h unreachable";continue}
-  if($cp){net use "\\$h\IPC$" /user:$($cp.UserName) $pw 2>&1|Out-Null}
-  $sh=Shares $h
-  if($sh){"[+] $h - $($sh.Count) shares: $($sh -join', ')"|Write-Host -F Green
-    foreach($s in $sh){$p=Walk $h $s;if($p){if($OutFile){$p|Add-Content $OutFile}else{$p};$f+=$p.Count}}}
-  else{Write-Verbose "[-] $h no readable shares"}
-  if($cp){net use "\\$h\IPC$" /delete /y 2>&1|Out-Null}}
+foreach($th in $t){
+  if(!(Test-Connection $th -Count 1 -Quiet -EA 0)){Write-Verbose "[-] $th unreachable";continue}
+  if($cp){net use "\\$th\IPC$" /user:$($cp.UserName) $pw 2>&1|Out-Null}
+  $sh=Shares $th
+  if($sh){"[+] $th - $($sh.Count) shares: $($sh -join', ')"|Write-Host -F Green
+    foreach($s in $sh){$p=Walk $th $s;if($p){if($OutFile){$p|Add-Content $OutFile}else{$p};$f+=$p.Count}}}
+  else{Write-Verbose "[-] $th no readable shares"}
+  if($cp){net use "\\$th\IPC$" /delete /y 2>&1|Out-Null}}
 "[i] done - $f paths -> $(if($OutFile){$OutFile}else{'pipeline'})"|Write-Host -F Cyan
 }
 function global:psc($u,$p){[pscredential]::new($u,(ConvertTo-SecureString $p -AsPlainText -Force))}
