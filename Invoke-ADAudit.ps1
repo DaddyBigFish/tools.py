@@ -1,22 +1,23 @@
 function Invoke-ADAudit{
 [CmdletBinding()]
-param([switch]$h,[string[]]$DC,[string]$SysvolLoot,[string]$OutFile="adaudit_$(Get-Date -f yyyyMMdd_HHmmss).csv",[pscredential]$Credential)
+param([switch]$h,[string[]]$DC,[string]$SysvolLoot,[string]$OutFile="adaudit_$(Get-Date -f yyyyMMdd_HHmmss).xlsx",[pscredential]$Credential)
 if($h){@'
 Invoke-ADAudit - read-only native AD findings collector (maps to ptdash findings-templates, FP-audited)
 
 usage:
-  Invoke-ADAudit                      fingerprint env, run applicable checks, write adaudit_<timestamp>.csv
+  Invoke-ADAudit                      fingerprint env, run applicable checks, write adaudit_<timestamp>.xlsx
   Invoke-ADAudit -DC DC01,DC02        override DC auto-discovery for registry/service checks
   Invoke-ADAudit -SysvolLoot x.txt    + grep smblist output for SYSVOL files (GPP lane)
-  Invoke-ADAudit -OutFile ''          emit objects to pipeline instead of CSV
+  Invoke-ADAudit -OutFile ''          emit objects to pipeline instead of xlsx
 
 load from URL:
   IEX (New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/USER/REPO/main/Invoke-ADAudit.ps1')
   Invoke-ADAudit -Verbose
 
-output: CSV columns Risk,Title,SamAccountName,SID,Detail
-  titles match findings-templates exactly where one exists; [*] = invented title (no template fit)
-  the fingerprint stage gates checks on DFL/schema/DC-OS so inapplicable checks never fire
+output:
+  .xlsx workbook - one tab per finding (31-char-safe names), rows = one per affected object
+  columns: Risk | SamAccountName | SID | Detail
+  terminal shows summary + skipped-check ledger only; all data goes to the file
 '@;return}
 $cp=$Credential
 $pw=if($cp){$cp.GetNetworkCredential().Password}
@@ -26,8 +27,6 @@ $cfg=$root.configurationNamingContext
 function Q($f){
   $s=if($cp){$de=New-Object DirectoryServices.DirectoryEntry("LDAP://$nc",$cp.UserName,$pw);New-Object DirectoryServices.DirectorySearcher($de,$f)}else{New-Object DirectoryServices.DirectorySearcher([adsi]'',$f)}
   $s.PageSize=1000
-  [void]$s.PropertiesToLoad.Add('sAMAccountName')
-  [void]$s.PropertiesToLoad.Add('objectSid')
   $s.FindAll()
 }
 $rows=New-Object System.Collections.Generic.List[object]
@@ -45,9 +44,102 @@ function SchemaHas($attr){
   $p="LDAP://CN=$attr,CN=Schema,CN=Configuration,$cfg"
   try{$null=(New-Object DirectoryServices.DirectoryEntry($p)).Name;return $true}catch{return $false}
 }
+# ---------- xlsx writer (pure zip+xml, no Excel/modules) ----------
+$sheetNames=@{
+ '[APM] - Active Directory - Machine Account Quota'='Machine Account Quota'
+ 'Authenticated Users can Create Machine Accounts'='Users Create Machine Accts'
+ 'Domain Account Policy'='Domain Account Policy'
+ 'Domain Functional Level'='Domain Functional Level'
+ 'Active Directory Recycle Bin Not Enabled'='Recycle Bin Not Enabled'
+ 'Krbtgt Password Not Changed Regularly'='krbtgt Not Rotated'
+ 'Domain Vulnerable to Kerberoasting'='Kerberoasting'
+ 'Kerberos Pre-Authentication Disabled'='Pre-Auth Disabled (AS-REP)'
+ '[APM] - Active Directory - Passwords Never Expire'='Passwords Never Expire'
+ '[*] Active Directory - Reversible Password Encryption Enabled'='Reversible Encryption'
+ '[*] Active Directory - Password Not Required Flag Set'='Password Not Required'
+ 'Large Number of Domain Administrators'='Excessive Domain Admins'
+ '[APM] - Active Directory - Service Account with High Privileges'='Privileged Service Accounts'
+ 'Account Delegation'='Privileged Acct Delegation'
+ '[*] Active Directory - Unconstrained Delegation Enabled'='Unconstrained Delegation'
+ 'Inactive Domain Computer Accounts'='Inactive Computers'
+ '[APM] - Active Directory - Inactive Accounts'='Inactive Users'
+ '[*] Active Directory - Weak Kerberos Encryption Types (RC4/DES)'='Weak Kerberos Encryption'
+ '[APM] - Active Directory - Unsupported Operating Systems'='Unsupported OS'
+ 'Windows 2003 Domain Controllers'='Windows 2003 DCs'
+ '[APM] - Endpoint - LAPS Implementation'='LAPS Implementation'
+ 'LM and NTLMv1 Authentication Enabled'='LM NTLMv1 Enabled'
+ 'Domain Controller - Enforce LDAP Signing'='LDAP Signing Not Enforced'
+ 'Spooler Service Running on Domain Controllers'='Spooler on DCs'
+ 'Passwords in SYSVOL Share'='Passwords in SYSVOL'
+}
+function XEsc($s){if($null -eq $s){return ''};("$s" -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' -replace '"','&quot;')}
+function CellRef($col,$row){[char](65+$col)+([string]$row)}
+function Export-FindingsXlsx($rows,$path){
+  Add-Type -AssemblyName System.IO.Compression
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $riskRank=@{Critical=0;High=1;Medium=2;Low=3;Informational=4}
+  $groups=$rows|Group-Object Title|Sort-Object {$riskRank[$_.Group[0].Risk]},Name
+  if(Test-Path $path){Remove-Item $path -Force}
+  $fs=[System.IO.File]::Open($path,'Create')
+  $zip=New-Object System.IO.Compression.ZipArchive($fs,[System.IO.Compression.ZipArchiveMode]::Create)
+  function Put($name,$text){
+    $e=$zip.CreateEntry($name)
+    $w=New-Object System.IO.StreamWriter($e.Open(),[Text.Encoding]::UTF8)
+    $w.Write($text);$w.Flush();$w.Dispose()
+  }
+  $n=$groups.Count
+  $ct='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+  1..$n|%{$ct+="<Override PartName=`"/xl/worksheets/sheet$_.xml`" ContentType=`"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml`"/>"}
+  $ct+='</Types>'
+  Put '[Content_Types].xml' $ct
+  Put '_rels/.rels' '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'
+  $wb='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+  $used=@{}
+  $i=0
+  $tabFor=@{}
+  foreach($g in $groups){
+    $i++
+    $tab=$sheetNames[$g.Name]
+    if(-not $tab){$tab=($g.Name -replace '\[.*?\]\s*-\s*','') -replace '[\[\]\:\*\?\/\\]',''}
+    $tab=$tab.Trim();if($tab.Length -gt 31){$tab=$tab.Substring(0,31)}
+    $base=$tab;$k=1
+    while($used.ContainsKey($tab)){$sfx=" ($k)";$tab=$base;if($tab.Length -gt (31-$sfx.Length)){$tab=$tab.Substring(0,31-$sfx.Length)};$tab+=$sfx;$k++}
+    $used[$tab]=1;$tabFor[$g.Name]=$tab
+    $wb+="<sheet name=`"$(XEsc $tab)`" sheetId=`"$i`" r:id=`"rId$i`"/>"
+  }
+  $wb+='</sheets></workbook>'
+  Put 'xl/workbook.xml' $wb
+  $rels='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+  1..$n|%{$rels+="<Relationship Id=`"rId$_`" Type=`"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet`" Target=`"worksheets/sheet$_.xml`"/>"}
+  $rels+='</Relationships>'
+  Put 'xl/_rels/workbook.xml.rels' $rels
+  $i=0
+  foreach($g in $groups){
+    $i++
+    $sx='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+    $hdr=@('Risk','SamAccountName','SID','Detail')
+    $sx+='<row r="1">'
+    0..3|%{$sx+="<c r=`"$(CellRef $_ 1)`" t=`"inlineStr`"><is><t>$(XEsc $hdr[$_])</t></is></c>"}
+    $sx+='</row>'
+    $r=1
+    foreach($o in $g.Group){
+      $r++
+      $vals=@($o.Risk,$o.SamAccountName,$o.SID,$o.Detail)
+      $sx+="<row r=`"$r`">"
+      0..3|%{$sx+="<c r=`"$(CellRef $_ $r)`" t=`"inlineStr`"><is><t>$(XEsc $vals[$_])</t></is></c>"}
+      $sx+='</row>'
+    }
+    $sx+='</sheetData></worksheet>'
+    Put "xl/worksheets/sheet$i.xml" $sx
+  }
+  $zip.Dispose();$fs.Dispose()
+  return $tabFor
+}
 
 # ---------- fingerprint ----------
-$d=(Q '(objectClass=domainDNS)')[0].Properties
+$domRes=Q '(objectClass=domainDNS)'
+if(!$domRes -or $domRes.Count -eq 0){throw "LDAP returned nothing for domainDNS - are you domain-authenticated? (runas /netonly or -Credential)"}
+$d=$domRes[0].Properties
 $dflMap=@{0='2000';1='2003';2='2008';3='2008R2';4='2012';5='2012R2';6='2016';7='2019+'}
 $dfl=[int]$d.'msds-behavior-version'[0]
 $dflName=$dflMap[$dfl]
@@ -82,7 +174,6 @@ if($mpaRaw -eq [long]::MinValue){
 
 if($dfl -le 3){Add-Row 'Medium' 'Domain Functional Level' '' '' "msDS-Behavior-Version=$dfl ($dflName) - legacy functional level"}
 
-# recycle bin: gate - feature cannot exist below DFL 2008R2
 if($dfl -ge 3){
   $part=if($cp){New-Object DirectoryServices.DirectoryEntry("LDAP://CN=Partitions,$cfg",$cp.UserName,$pw)}else{[adsi]"LDAP://CN=Partitions,$cfg"}
   $ef=@($part.Properties['msDS-EnabledFeature'])
@@ -94,7 +185,7 @@ $kt=[DateTime]::FromFileTime((Q '(sAMAccountName=krbtgt)')[0].Properties.pwdlast
 if($kt -lt (Get-Date).AddDays(-180)){Add-Row 'High' 'Krbtgt Password Not Changed Regularly' 'krbtgt' '' ("krbtgt pwdLastSet="+$kt.ToString('yyyy-MM-dd')+" - golden ticket exposure window")}
 else{Skip-Row 'krbtgt rotation' 'rotated within 180 days'}
 
-# ---------- account hygiene (self-gating: no objects = no rows) ----------
+# ---------- account hygiene (self-gating) ----------
 Q '(&(objectCategory=user)(servicePrincipalName=*)(!(sAMAccountName=krbtgt))(!(userAccountControl:1.2.840.113556.1.4.803:=2)))'|%{
   Add-Row 'High' 'Domain Vulnerable to Kerberoasting' $_.Properties.samaccountname[0] (SidOf $_) 'enabled account with SPN - ticket requestable, offline-crackable'
 }
@@ -145,7 +236,6 @@ Q '(objectCategory=computer)'|%{
 $oldDC=@($dcObjs|%{$o=$_.Properties.operatingsystem;if($o -and $o[0] -match '2000|2003'){"$($_.Properties.name[0]) ($($o[0]))"}})
 if($oldDC.Count -gt 0){Add-Row 'Critical' 'Windows 2003 Domain Controllers' '' '' "$($oldDC -join', ')"}
 
-# LAPS: gate on schema presence for honest wording
 if(-not $hasLegacyLaps -and -not $hasWinLaps){
   Add-Row 'Medium' '[APM] - Endpoint - LAPS Implementation' '' '' 'schema never extended for LAPS (neither ms-Mcs-AdmPwd nor msLAPS-Password exists) - LAPS not deployed'
 }else{
@@ -157,7 +247,7 @@ if(-not $hasLegacyLaps -and -not $hasWinLaps){
   else{Skip-Row 'LAPS' "deployed on all $allC computers"}
 }
 
-# ---------- DC checks: auto-discovered, or -DC override ----------
+# ---------- DC checks ----------
 $targets=if($DC){$DC}else{$dcNames}
 if($targets){
   foreach($t in $targets){
@@ -183,9 +273,13 @@ if($SysvolLoot -and(Test-Path $SysvolLoot)){
   if($gx){Add-Row 'High' 'Passwords in SYSVOL Share' '' '' "$($gx.Count) candidate files in smblist loot - pull and grep for cpassword= / credentials"}
 }elseif($SysvolLoot){Skip-Row 'SYSVOL loot grep' "file not found: $SysvolLoot"}
 
-"[i] $($rows.Count) finding rows, $($skipped.Count) checks skipped as N/A"|Write-Host -ForegroundColor Cyan
-$rows|Sort-Object Risk,Title|Format-Table Risk,Title,SamAccountName -Auto
-if($skipped.Count){"[i] skipped (not applicable to this environment):"|Write-Host -ForegroundColor DarkYellow;$skipped|%{Write-Host "    - $_" -ForegroundColor DarkYellow}}
-if($OutFile){$rows|Export-Csv -NoTypeInformation -Path $OutFile;"[i] CSV -> $OutFile"|Write-Host -ForegroundColor Cyan}else{$rows}
+# ---------- output: summary to terminal, data to file ----------
+"[i] $($rows.Count) evidence rows across $(@($rows|Group-Object Title).Count) findings, $($skipped.Count) checks skipped as N/A"|Write-Host -ForegroundColor Cyan
+$rows|Group-Object Title|Sort-Object Name|%{"[{0}] {1} - {2} row(s)" -f $_.Group[0].Risk,$_.Name,$_.Count}|Write-Host
+if($skipped.Count){"[i] skipped (not applicable):"|Write-Host -ForegroundColor DarkYellow;$skipped|%{Write-Host "    - $_" -ForegroundColor DarkYellow}}
+if($OutFile){
+  $tabs=Export-FindingsXlsx $rows $OutFile
+  "[i] workbook -> $OutFile ($($tabs.Count) tabs)"|Write-Host -ForegroundColor Cyan
+}else{$rows}
 }
 if($PSCommandPath){Invoke-ADAudit @args}
