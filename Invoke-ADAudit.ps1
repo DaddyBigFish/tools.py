@@ -43,7 +43,7 @@ function SidOf($r){
 }
 function GuidOf($r){
   $b=$r.Properties.objectguid
-  if($b -and $b[0]){(New-Object Guid($b[0])).Guid}else{''}
+  if($b -and $b[0]){(New-Object Guid(,$b[0])).Guid}else{''}
 }
 function SchemaHas($attr){
   $p="LDAP://CN=$attr,CN=Schema,CN=Configuration,$cfg"
