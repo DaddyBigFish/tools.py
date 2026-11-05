@@ -8,6 +8,7 @@ usage:
   Invoke-ADAudit                      fingerprint env, run applicable checks, write adaudit_<timestamp>.xlsx
   Invoke-ADAudit -DC DC01,DC02        override DC auto-discovery for registry/service checks
   Invoke-ADAudit -SysvolLoot x.txt    + grep smblist output for SYSVOL files (GPP lane)
+  Invoke-ADAudit -OutFile C:\Temp    folder path - auto-names adaudit_<timestamp>.xlsx inside
   Invoke-ADAudit -OutFile ''          emit objects to pipeline instead of xlsx
 
 load from URL:
@@ -20,6 +21,7 @@ output:
   terminal shows summary + skipped-check ledger only; all data goes to the file
   LAPS proof uses world-readable ExpirationTime attributes (password attrs are confidential)
 '@;return}
+if($OutFile -and (Test-Path $OutFile -PathType Container)){$OutFile=Join-Path $OutFile "adaudit_$(Get-Date -f yyyyMMdd_HHmmss).xlsx"}
 $cp=$Credential
 $pw=if($cp){$cp.GetNetworkCredential().Password}
 $root=if($cp){New-Object DirectoryServices.DirectoryEntry('LDAP://RootDSE',$cp.UserName,$pw)}else{[adsi]'LDAP://RootDSE'}
