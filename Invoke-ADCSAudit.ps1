@@ -247,6 +247,42 @@ function Test-PrincipalInScope {
     return $script:UserSids.ContainsKey($Sid)
 }
 
+function ConvertFrom-AceBinary {
+    param([System.Security.AccessControl.GenericAce]$Ace)
+    # Some PowerShell/.NET ACE wrappers do not expose IdentityReference even for
+    # relevant ACEs. Parse the stable binary ACE layout instead of relying on it.
+    $bytes = [byte[]]::new($Ace.BinaryLength)
+    $Ace.GetBinaryForm($bytes, 0)
+    if ($bytes.Length -lt 16) { return $null }
+    $aceType = [int]$bytes[0]
+    if ($aceType -notin @(0,1,5,7)) { return $null } # Allow/Deny, standard/object
+    $mask = [int64][BitConverter]::ToUInt32($bytes, 4)
+    $isObjectAce = $aceType -in @(5,7)
+    $objectType = [guid]::Empty
+    $sidOffset = 8
+    if ($isObjectAce) {
+        if ($bytes.Length -lt 20) { return $null }
+        $objectFlags = [BitConverter]::ToInt32($bytes, 8)
+        $sidOffset = 12
+        if (($objectFlags -band 0x1) -ne 0) {
+            if ($bytes.Length -lt ($sidOffset + 16)) { return $null }
+            $objectType = [guid]::new([byte[]]$bytes[$sidOffset..($sidOffset + 15)])
+            $sidOffset += 16
+        }
+        if (($objectFlags -band 0x2) -ne 0) { $sidOffset += 16 }
+    }
+    if ($bytes.Length -le ($sidOffset + 8)) { return $null }
+    $sid = [System.Security.Principal.SecurityIdentifier]::new($bytes, $sidOffset).Value
+    return [pscustomobject]@{
+        Sid = $sid
+        Mask = $mask
+        Allow = ($aceType -in @(0,5))
+        Deny = ($aceType -in @(1,7))
+        IsObjectAce = $isObjectAce
+        ObjectType = $objectType
+    }
+}
+
 function Get-AclEntries {
     param([byte[]]$Bytes)
     if ($null -eq $Bytes -or $Bytes.Length -lt 20) {
@@ -262,29 +298,12 @@ function Get-AclEntries {
     $entries = New-Object System.Collections.ArrayList
     if ($null -ne $descriptor.DiscretionaryAcl) {
         foreach ($ace in $descriptor.DiscretionaryAcl) {
-            $allow = $ace.AceType -in @(
-                [System.Security.AccessControl.AceType]::AccessAllowed,
-                [System.Security.AccessControl.AceType]::AccessAllowedObject
-            )
-            $deny = $ace.AceType -in @(
-                [System.Security.AccessControl.AceType]::AccessDenied,
-                [System.Security.AccessControl.AceType]::AccessDeniedObject
-            )
-            if (-not ($allow -or $deny)) { continue }
-            $objectType = [guid]::Empty
-            $isObjectAce = $ace -is [System.Security.AccessControl.ObjectAce]
-            if ($isObjectAce -and
-                ($ace.ObjectAceFlags -band [System.Security.AccessControl.ObjectAceFlags]::ObjectAceTypePresent) -ne 0) {
-                $objectType = $ace.ObjectAceType
+            try { $parsedAce = ConvertFrom-AceBinary -Ace $ace }
+            catch {
+                Write-Warning "Skipping an unreadable ACE: $($_.Exception.Message)"
+                continue
             }
-            [void]$entries.Add([pscustomobject]@{
-                Sid = $ace.IdentityReference.Value
-                Mask = ([int64]$ace.AccessMask -band 0xffffffffL)
-                Allow = $allow
-                Deny = $deny
-                IsObjectAce = $isObjectAce
-                ObjectType = $objectType
-            })
+            if ($null -ne $parsedAce) { [void]$entries.Add($parsedAce) }
         }
     }
     return @{
