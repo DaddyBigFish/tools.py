@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import asyncio, argparse, time, shutil, sys
+import asyncio, argparse, time, shutil, sys, socket, struct
 
 if sys.platform == 'win32':
     import ctypes; ctypes.cdll.msvcrt._setmaxstdio(8192)
@@ -16,9 +16,35 @@ def fmt(s):
     m, s = divmod(s, 60)
     return f"{h}h{m:02d}m{s:02d}s" if h else f"{m}m{s:02d}s"
 
-async def probe(host, port, timeout):
+async def socks_connect(proxy, host, port, rdns):
+    """SOCKS5 CONNECT (no-auth). rdns=True -> remote DNS (ATYP=domain, like curl --socks5h)."""
+    ph, pp = proxy
+    r, w = await asyncio.open_connection(ph, pp)
+    w.write(b"\x05\x01\x00"); await w.drain()                      # greeting: v5, 1 method, no-auth
+    if await r.readexactly(2) != b"\x05\x00":
+        w.close(); raise OSError("SOCKS5: no-auth method rejected")
+    if rdns:                                                      # remote resolves the name
+        hb = host.encode()
+        addr = b"\x03" + bytes([len(hb)]) + hb
+    else:                                                         # local resolve, send IPv4
+        addr = b"\x01" + socket.inet_aton(socket.gethostbyname(host))
+    w.write(b"\x05\x01\x00" + addr + struct.pack(">H", port)); await w.drain()
+    head = await r.readexactly(4)
+    if head[1] != 0x00:
+        w.close(); raise OSError(f"SOCKS5 connect refused (code {head[1]})")
+    atyp = head[3]                                                # drain bound address
+    if atyp == 1:   await r.readexactly(4)
+    elif atyp == 3: await r.readexactly((await r.readexactly(1))[0])
+    else:           await r.readexactly(16)
+    await r.readexactly(2)                                        # bound port
+    return w
+
+async def probe(host, port, timeout, proxy=None, rdns=False):
     try:
-        _, w = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
+        if proxy:
+            w = await asyncio.wait_for(socks_connect(proxy, host, port, rdns), timeout)
+        else:
+            _, w = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
         w.close()
         return port
     except Exception:
@@ -31,35 +57,73 @@ async def run(args):
     except Exception:
         hosts = [args.target]
 
+    proxy, rdns = None, False
+    raw = args.socks5 or args.socks5h
+    if raw:
+        rdns = bool(args.socks5h)
+        ph, _, ps = raw.partition(":")
+        proxy = (ph, int(ps) if ps else 1080)
+
     total = (e - s + 1) * len(hosts)
-    done, start = 0, time.time()
-    W = shutil.get_terminal_size().columns
+    done, found_total, start = 0, 0, time.time()
+    tty = sys.stdout.isatty()
+    BAR_W = 25
 
-    def draw(host, pct=None, found=0):
+    def status(host, idx):
+        # fresh width every draw -> resize-safe; \x1b[2K erases the line cleanly
+        cols = shutil.get_terminal_size((80, 20)).columns
         elapsed = time.time() - start
-        pct = pct if pct is not None else int(done * 100 / total)
-        eta = "--" if pct < 1 else fmt(0) if pct == 100 else fmt((total - done) / (done / elapsed))
-        bar = "█" * (pct * 30 // 100) + "░" * (30 - pct * 30 // 100)
-        print(f"\r{f'{host:<20} [{bar}] {pct:3d}%  ({found} open)  ETA: {eta}':<{W}}", end="", flush=True)
+        pct = int(done * 100 / total) if total else 100
+        if done == 0:
+            eta = "--"
+        elif done >= total:
+            eta = fmt(0)
+        else:
+            eta = fmt((total - done) / (done / elapsed))
+        fill = pct * BAR_W // 100
+        bar = "█" * fill + "░" * (BAR_W - fill)
+        line = f"{host:<24} [{bar}] {pct:3d}%  {found_total} open  ETA {eta}  ({idx}/{len(hosts)})"
+        if tty:
+            sys.stdout.write("\x1b[2K\r" + line[: max(cols - 1, 10)])
+        else:
+            sys.stdout.write(line + "\n")
+        sys.stdout.flush()
 
-    for host in hosts:
+    def found(host, port):
+        # ports print the instant they're identified — the status line
+        # re-renders underneath on the next tick
+        if tty:
+            sys.stdout.write(f"\x1b[2K\r{host}:{port} open\n")
+        else:
+            sys.stdout.write(f"{host}:{port} open\n")
+        sys.stdout.flush()
+
+    tick = 0.1 if tty else 5.0
+
+    for idx, host in enumerate(hosts, 1):
         ports = iter(range(s, e + 1))
-        last, open_ports = 0.0, []
+        last = 0.0
 
         async def worker():
-            nonlocal done, last
+            nonlocal done, found_total, last
             for port in ports:
-                if (result := await probe(host, port, args.timeout)) is not None:
-                    open_ports.append(result)
+                if (result := await probe(host, port, args.timeout, proxy, rdns)) is not None:
+                    found_total += 1
+                    found(host, result)
                 done += 1
-                if (now := time.time()) - last >= 0.1 and done < total:
-                    last = now; draw(host, found=len(open_ports))
+                if (now := time.time()) - last >= tick and done < total:
+                    last = now
+                    status(host, idx)
 
-        draw(host, 0, found=0)
+        status(host, idx)
         await asyncio.gather(*[asyncio.create_task(worker()) for _ in range(min(args.concurrency, e - s + 1))])
-        print(f"\r{' ' * W}", end="")
-        for port in sorted(open_ports):
-            print(f"\r{host}:{port} open")
+        if tty:
+            sys.stdout.write("\x1b[2K\r")
+            sys.stdout.flush()
+        else:
+            status(host, idx)
+
+    sys.stdout.write(f"done: {found_total} open across {len(hosts)} host(s) in {fmt(time.time() - start)}\n")
 
 def main():
     p = argparse.ArgumentParser()
@@ -67,9 +131,14 @@ def main():
     p.add_argument("range", nargs="?", default="0-65535")
     p.add_argument("--timeout", type=float, default=15.0)
     p.add_argument("--concurrency", type=int, default=65535)
-    p.add_argument("--proxy", action="store_true")
+    p.add_argument("--socks5", metavar="HOST[:PORT]", help="SOCKS5 proxy, local DNS (default port 1080)")
+    p.add_argument("--socks5h", metavar="HOST[:PORT]", help="SOCKS5 proxy, remote DNS (like curl --socks5h)")
     args = p.parse_args()
-    if args.proxy: args.timeout, args.concurrency = 5.0, 50
+    if args.socks5 and args.socks5h:
+        p.error("use --socks5 or --socks5h, not both")
+    if (args.socks5 or args.socks5h):
+        if args.timeout == 15.0: args.timeout = 5.0        # saner tunnel defaults
+        if args.concurrency == 65535: args.concurrency = 100
     asyncio.run(run(args))
 
 if __name__ == "__main__":
