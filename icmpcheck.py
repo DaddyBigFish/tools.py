@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 import sys,os,subprocess,threading,datetime
 if os.geteuid()!=0: os.execvp("sudo",["sudo",sys.executable]+sys.argv)
-from rich.console import Console
-from rich.table import Table
-con=Console()
 args=sys.argv[1:]; v="--vulnerable" in args; f=""
 for a in reversed(args):
     if a!="--vulnerable": f=a; break
-key=Table(title="KEY",show_lines=True)
-key.add_column("Status"); key.add_column("Meaning")
-key.add_row("🟢","VULNERABLE (answers ICMP timestamp)")
-key.add_row("🔴","NOT VULNERABLE (no reply/filtered)")
-key.add_row("⚪","ERROR (hping3 missing / request failed)")
-con.print(key)
+print("""+--------+-----------------------------------------+
+| Status | Meaning                                 |
++--------+-----------------------------------------+
+| 🟢     | VULNERABLE (answers ICMP timestamp)     |
+| 🔴     | NOT VULNERABLE (no reply/filtered)      |
+| ⚪     | ERROR (hping3 missing / request failed) |
++--------+-----------------------------------------+""")
 res=[]
 def s(i):
     try:
