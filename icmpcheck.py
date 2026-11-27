@@ -4,13 +4,14 @@ if os.geteuid()!=0: os.execvp("sudo",["sudo",sys.executable]+sys.argv)
 args=sys.argv[1:]; v="--vulnerable" in args; f=""
 for a in reversed(args):
     if a!="--vulnerable": f=a; break
-print("""+--------+-----------------------------------------+
-| Status | Meaning                                 |
-+--------+-----------------------------------------+
-| 🟢     | VULNERABLE (answers ICMP timestamp)     |
-| 🔴     | NOT VULNERABLE (no reply/filtered)      |
-| ⚪     | ERROR (hping3 missing / request failed) |
-+--------+-----------------------------------------+""")
+print("""
++--------+---------------------------------------------------+
+| Status | Meaning
++--------+---------------------------------------------------+
+| 🟢     | VULNERABLE      (answers ICMP timestamp)
+| 🔴     | NOT VULNERABLE  (no reply/filtered)
+| ⚪     | ERROR           (hping3 missing / request failed)
++--------+---------------------------------------------------+""")
 res=[]
 def s(i):
     try:
